@@ -21,6 +21,7 @@
 A fake VMware VI API implementation.
 """
 
+import collections
 import pprint
 import uuid
 
@@ -86,15 +87,43 @@ def _get_objects(obj_type):
 class Prop(object):
     """Property Object base class."""
 
-    def __init__(self):
-        self.name = None
-        self.val = None
+    def __init__(self, name=None, val=None):
+        self.name = name
+        self.val = val
 
 
-class Obj(object):
-    def __init__(self, name, value):
-        self.value = value
-        self._type = name
+class ManagedObjectReference(object):
+    """A managed object reference is a remote identifier."""
+
+    def __init__(self, value="object-123", _type="ManagedObject"):
+        super(ManagedObjectReference, self)
+        object.__setattr__(self, 'value', value)
+        object.__setattr__(self, '_type', _type)
+
+
+class ObjectContent(object):
+    """ObjectContent array hold dynamic properties."""
+
+    # This class is a *fake* of a class sent back to us by
+    # SOAP. It has its own names. These names are decided
+    # for us by the API we are *faking* here.
+    def __init__(self, obj_ref, prop_list=None, missing_list=None):
+        self.obj = obj_ref
+
+        if not isinstance(prop_list, collections.Iterable):
+            prop_list = []
+
+        if not isinstance(missing_list, collections.Iterable):
+            missing_list = []
+
+        # propSet is the name your Python code will need to
+        # use since this is the name that the API will use
+        self.propSet = prop_list
+
+        # missingSet is the name your python code will
+        # need to use since this is the name that the
+        # API we are talking to will use.
+        self.missingSet = missing_list
 
 
 class ManagedObject(object):
@@ -104,7 +133,7 @@ class ManagedObject(object):
         """Sets the obj property which acts as a reference to the object."""
         super(ManagedObject, self).__setattr__('objName', name)
         if obj_ref is None:
-            obj_ref = Obj(name, value)
+            obj_ref = ManagedObjectReference(uuid.uuid4(), name)
         object.__setattr__(self, 'obj', obj_ref)
         object.__setattr__(self, 'propSet', [])
 
@@ -310,8 +339,8 @@ class HostNetworkSystem(ManagedObject):
 class HostSystem(ManagedObject):
     """Host System class."""
 
-    def __init__(self):
-        super(HostSystem, self).__init__("HostSystem")
+    def __init__(self, obj_ref=None):
+        super(HostSystem, self).__init__("HostSystem", obj_ref)
         self.set("name", "ha-host")
         if _db_content.get("HostNetworkSystem", None) is None:
             create_host_network_system()

@@ -16,7 +16,7 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-import re
+from collections import namedtuple
 
 from nova import exception
 from nova import test
@@ -35,9 +35,11 @@ class fake_session(object):
 class VMwareVMUtilTestCase(test.TestCase):
     def setUp(self):
         super(VMwareVMUtilTestCase, self).setUp()
+        fake.reset()
 
     def tearDown(self):
         super(VMwareVMUtilTestCase, self).tearDown()
+        fake.reset()
 
     def test_get_datastore_ref_and_name(self):
         result = vm_util.get_datastore_ref_and_name(
@@ -92,3 +94,92 @@ class VMwareVMUtilTestCase(test.TestCase):
         self.assertRaises(exception.DatastoreNotFound,
                 vm_util.get_datastore_ref_and_name,
                 fake_session(), cluster="fake-cluster")
+
+    def test_get_host_ref_from_id(self):
+
+        fake_host_sys = fake.HostSystem(
+            fake.ManagedObjectReference("HostSystem", "host-123"))
+
+        fake_host_id = fake_host_sys.obj.value
+        fake_host_name = "ha-host"
+
+        ref = vm_util.get_host_ref_from_id(
+            fake_session([fake_host_sys]), fake_host_id, ['name'])
+
+        self.assertIsInstance(ref, fake.HostSystem)
+        self.assertEqual(fake_host_id, ref.obj.value)
+
+        host_name = vm_util.get_host_name_from_host_ref(ref)
+
+        self.assertEquals(fake_host_name, host_name)
+
+    def test_get_host_name_for_vm(self):
+
+        fake_vm = fake.ManagedObject(
+            "VirtualMachine", fake.ManagedObjectReference(
+                "vm-123", "VirtualMachine"))
+        fake_vm.propSet.append(
+            fake.Prop('name', 'vm-123'))
+
+        vm_ref = vm_util.get_vm_ref_from_name(
+                fake_session([fake_vm]), 'vm-123')
+
+        self.assertIsNotNone(vm_ref)
+
+        fake_results = [
+            fake.ObjectContent(
+                None, [
+                    fake.Prop('runtime.host',
+                              fake.ManagedObjectReference(
+                                'host-123', 'HostSystem'))
+                ])]
+
+        host_id =\
+            vm_util.get_host_id_from_vm_ref(
+                fake_session(fake_results), vm_ref)
+
+        self.assertEqual('host-123', host_id)
+
+    def test_property_from_property_set(self):
+
+        Property = namedtuple('Property', ['propSet'])
+        Prop = namedtuple('Prop', ['name', 'val'])
+        MoRef = namedtuple('Val', ['value'])
+
+        properties_good = [
+            Property(propSet=[Prop(name='name', val=MoRef(value='vm-123'))]),
+            Property(propSet=[
+                Prop(name='foo', val=MoRef(value='bar1')),
+                Prop(name='runtime.host', val=MoRef(value='host-123')),
+                Prop(name='foo', val=MoRef(value='bar2')),
+            ]),
+            Property(propSet=[
+                Prop(name='something', val=MoRef(value='thing'))]), ]
+
+        properties_bad = [
+            Property(propSet=[
+                Prop(name='name', val=MoRef(value='vm-123'))]),
+            Property(propSet=[
+                Prop(name='foo', val='bar1'),
+                Prop(name='foo', val='bar2'), ]),
+            Property(propSet=[
+                Prop(name='something', val=MoRef(value='thing'))]), ]
+
+        prop = vm_util.property_from_property_set(
+                    'runtime.host', properties_good)
+        self.assertIsNotNone(prop)
+        value = prop.val.value
+        self.assertEqual('host-123', value)
+
+        prop2 = vm_util.property_from_property_set(
+                    'runtime.host', properties_bad)
+        self.assertIsNone(prop2)
+
+        prop3 = vm_util.property_from_property_set('foo', properties_good)
+        self.assertIsNotNone(prop3)
+        val3 = prop3.val.value
+        self.assertEqual('bar1', val3)
+
+        prop4 = vm_util.property_from_property_set('foo', properties_bad)
+        self.assertIsNotNone(prop4)
+        self.assertEqual('bar1', prop4.val)
