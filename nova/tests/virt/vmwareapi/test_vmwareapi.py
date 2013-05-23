@@ -52,6 +52,12 @@ class fake_vm_ref(object):
         self._type = 'VirtualMachine'
 
 
+class fake_res_ref(object):
+    def __init__(self):
+        self.value = 'resgroup-test'
+        self._type = 'ResourcePool'
+
+
 class fake_http_resp(object):
     def __init__(self):
         self.code = 200
@@ -119,7 +125,7 @@ class VMwareAPIVMTestCase(test.TestCase):
         vmwareapi_fake.reset()
         db_fakes.stub_out_db_instance_api(self.stubs)
         stubs.set_stubs(self.stubs)
-        self.conn = driver.VMwareVCDriver(fake.FakeVirtAPI)
+        self.conn = driver.VMwareESXDriver(fake.FakeVirtAPI)
         # NOTE(vish): none of the network plugging code is actually
         #             being tested
         self.network_info = utils.get_test_network_info(legacy_model=False)
@@ -454,6 +460,121 @@ class VMwareAPIVMTestCase(test.TestCase):
         self.mox.ReplayAll()
         self.conn.get_console_output(self.instance)
 
+    def test_diagnostics_non_existent_vm(self):
+        self._create_instance_in_the_db()
+        self.assertRaises(exception.InstanceNotFound,
+                          self.conn.get_diagnostics,
+                          self.instance)
+
+    def test_get_console_pool_info(self):
+        info = self.conn.get_console_pool_info("console_type")
+        self.assertEquals(info['address'], 'test_url')
+        self.assertEquals(info['username'], 'test_username')
+        self.assertEquals(info['password'], 'test_pass')
+
+    def test_get_vnc_console_non_existent(self):
+        self._create_instance_in_the_db()
+        self.assertRaises(exception.InstanceNotFound,
+                          self.conn.get_vnc_console,
+                          self.instance)
+
+    def test_get_vnc_console(self):
+        self._create_instance_in_the_db()
+        self._create_vm()
+        vnc_dict = self.conn.get_vnc_console(self.instance)
+        self.assertEquals(vnc_dict['host'], "test_url")
+        self.assertEquals(vnc_dict['port'], 5910)
+
+    def test_host_ip_addr(self):
+        self.assertEquals(self.conn.get_host_ip_addr(), "test_url")
+
+    def test_get_volume_connector(self):
+        self._create_instance_in_the_db()
+        connector_dict = self.conn.get_volume_connector(self.instance)
+        self.assertEquals(connector_dict['ip'], "test_url")
+        self.assertEquals(connector_dict['initiator'], "iscsi-name")
+        self.assertEquals(connector_dict['host'], "test_url")
+
+
+class VMwareAPIHostTestCase(test.TestCase):
+    """Unit tests for Vmware API host calls."""
+
+    def setUp(self):
+        super(VMwareAPIHostTestCase, self).setUp()
+        self.flags(host_ip='test_url',
+                   host_username='test_username',
+                   host_password='test_pass', group='vmware')
+        vmwareapi_fake.reset()
+        stubs.set_stubs(self.stubs)
+        self.conn = driver.VMwareESXDriver(False)
+
+    def tearDown(self):
+        super(VMwareAPIHostTestCase, self).tearDown()
+        vmwareapi_fake.cleanup()
+
+    def test_host_state(self):
+        stats = self.conn.get_host_stats()
+        self.assertEquals(stats['vcpus'], 16)
+        self.assertEquals(stats['disk_total'], 1024)
+        self.assertEquals(stats['disk_available'], 500)
+        self.assertEquals(stats['disk_used'], 1024 - 500)
+        self.assertEquals(stats['host_memory_total'], 1024)
+        self.assertEquals(stats['host_memory_free'], 1024 - 500)
+        supported_instances = [('i686', 'vmware', 'hvm'),
+                               ('x86_64', 'vmware', 'hvm')]
+        self.assertEquals(stats['supported_instances'], supported_instances)
+
+    def _test_host_action(self, method, action, expected=None):
+        result = method('host', action)
+        self.assertEqual(result, expected)
+
+    def test_host_reboot(self):
+        self._test_host_action(self.conn.host_power_action, 'reboot')
+
+    def test_host_shutdown(self):
+        self._test_host_action(self.conn.host_power_action, 'shutdown')
+
+    def test_host_startup(self):
+        self._test_host_action(self.conn.host_power_action, 'startup')
+
+    def test_host_maintenance_on(self):
+        self._test_host_action(self.conn.host_maintenance_mode, True)
+
+    def test_host_maintenance_off(self):
+        self._test_host_action(self.conn.host_maintenance_mode, False)
+
+
+class VMwareAPIVCDriverTestCase(VMwareAPIVMTestCase):
+
+    def setUp(self):
+        super(VMwareAPIVCDriverTestCase, self).setUp()
+        self.flags(
+                   cluster_name=['test_cluster'],
+                   task_poll_interval=10, group='vmware')
+        self.flags(vnc_enabled=False)
+        self.node_name = 'domain-test(test_cluster)'
+        self.conn = driver.VMwareVCDriver(None, False)
+
+    def tearDown(self):
+        super(VMwareAPIVCDriverTestCase, self).tearDown()
+        vmwareapi_fake.cleanup()
+
+    def test_get_available_resource(self):
+        stats = self.conn.get_available_resource(self.node_name)
+        self.assertEquals(stats['vcpus'], 16)
+        self.assertEquals(stats['local_gb'], 1024)
+        self.assertEquals(stats['local_gb_used'], 1024 - 500)
+        self.assertEquals(stats['memory_mb'], 1024)
+        self.assertEquals(stats['memory_mb_used'], 1024 - 524)
+        self.assertEquals(stats['hypervisor_type'], 'VMware ESXi')
+        self.assertEquals(stats['hypervisor_version'], '5.0.0')
+        self.assertEquals(stats['hypervisor_hostname'],
+                                'domain-test(test_cluster)')
+
+    def test_get_available_nodes(self):
+        nodelist = self.conn.get_available_nodes()
+        self.assertEquals(nodelist, ['domain-test(test_cluster)'])
+
     def _test_finish_migration(self, power_on):
         """
         Tests the finish_migration method on vmops via the
@@ -556,110 +677,9 @@ class VMwareAPIVMTestCase(test.TestCase):
     def test_finish_revert_migration_power_off(self):
         self._test_finish_revert_migration(power_on=False)
 
-    def test_diagnostics_non_existent_vm(self):
-        self._create_instance_in_the_db()
-        self.assertRaises(exception.InstanceNotFound,
-                          self.conn.get_diagnostics,
-                          self.instance)
-
-    def test_get_console_pool_info(self):
-        info = self.conn.get_console_pool_info("console_type")
-        self.assertEquals(info['address'], 'test_url')
-        self.assertEquals(info['username'], 'test_username')
-        self.assertEquals(info['password'], 'test_pass')
-
-    def test_get_vnc_console_non_existent(self):
-        self._create_instance_in_the_db()
-        self.assertRaises(exception.InstanceNotFound,
-                          self.conn.get_vnc_console,
-                          self.instance)
-
     def test_get_vnc_console(self):
         self._create_instance_in_the_db()
         self._create_vm()
         vnc_dict = self.conn.get_vnc_console(self.instance)
         self.assertEquals(vnc_dict['host'], "ha-host")
         self.assertEquals(vnc_dict['port'], 5910)
-
-    def test_host_ip_addr(self):
-        self.assertEquals(self.conn.get_host_ip_addr(), "test_url")
-
-    def test_get_volume_connector(self):
-        self._create_instance_in_the_db()
-        connector_dict = self.conn.get_volume_connector(self.instance)
-        self.assertEquals(connector_dict['ip'], "test_url")
-        self.assertEquals(connector_dict['initiator'], "iscsi-name")
-        self.assertEquals(connector_dict['host'], "test_url")
-
-
-class VMwareAPIHostTestCase(test.TestCase):
-    """Unit tests for Vmware API host calls."""
-
-    def setUp(self):
-        super(VMwareAPIHostTestCase, self).setUp()
-        self.flags(host_ip='test_url',
-                   host_username='test_username',
-                   host_password='test_pass', group='vmware')
-        vmwareapi_fake.reset()
-        stubs.set_stubs(self.stubs)
-        self.conn = driver.VMwareESXDriver(False)
-
-    def tearDown(self):
-        super(VMwareAPIHostTestCase, self).tearDown()
-        vmwareapi_fake.cleanup()
-
-    def test_host_state(self):
-        stats = self.conn.get_host_stats()
-        self.assertEquals(stats['vcpus'], 16)
-        self.assertEquals(stats['disk_total'], 1024)
-        self.assertEquals(stats['disk_available'], 500)
-        self.assertEquals(stats['disk_used'], 1024 - 500)
-        self.assertEquals(stats['host_memory_total'], 1024)
-        self.assertEquals(stats['host_memory_free'], 1024 - 500)
-        supported_instances = [('i686', 'vmware', 'hvm'),
-                               ('x86_64', 'vmware', 'hvm')]
-        self.assertEquals(stats['supported_instances'], supported_instances)
-
-    def _test_host_action(self, method, action, expected=None):
-        result = method('host', action)
-        self.assertEqual(result, expected)
-
-    def test_host_reboot(self):
-        self._test_host_action(self.conn.host_power_action, 'reboot')
-
-    def test_host_shutdown(self):
-        self._test_host_action(self.conn.host_power_action, 'shutdown')
-
-    def test_host_startup(self):
-        self._test_host_action(self.conn.host_power_action, 'startup')
-
-    def test_host_maintenance_on(self):
-        self._test_host_action(self.conn.host_maintenance_mode, True)
-
-    def test_host_maintenance_off(self):
-        self._test_host_action(self.conn.host_maintenance_mode, False)
-
-
-class VMwareAPIVCDriverTestCase(VMwareAPIVMTestCase):
-
-    def setUp(self):
-        super(VMwareAPIVCDriverTestCase, self).setUp()
-        self.flags(cluster_name='test_cluster',
-                   task_poll_interval=10, group='vmware')
-        self.flags(vnc_enabled=False)
-        self.conn = driver.VMwareVCDriver(None, False)
-
-    def tearDown(self):
-        super(VMwareAPIVCDriverTestCase, self).tearDown()
-        vmwareapi_fake.cleanup()
-
-    def test_get_available_resource(self):
-        stats = self.conn.get_available_resource(self.node_name)
-        self.assertEquals(stats['vcpus'], 16)
-        self.assertEquals(stats['local_gb'], 1024)
-        self.assertEquals(stats['local_gb_used'], 1024 - 500)
-        self.assertEquals(stats['memory_mb'], 1024)
-        self.assertEquals(stats['memory_mb_used'], 1024 - 524)
-        self.assertEquals(stats['hypervisor_type'], 'VMware ESXi')
-        self.assertEquals(stats['hypervisor_version'], '5.0.0')
-        self.assertEquals(stats['hypervisor_hostname'], 'test_url')

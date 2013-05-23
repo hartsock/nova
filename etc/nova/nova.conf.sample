@@ -3065,7 +3065,7 @@
 #host_password=<None>
 
 # Name of a VMware Cluster ComputeResource. Used only if
-# compute_driver is vmwareapi.VMwareVCDriver. (string value)
+# compute_driver is vmwareapi.VMwareVCDriver. (multi valued)
 #cluster_name=<None>
 
 # The interval used for polling of remote tasks. Used only if

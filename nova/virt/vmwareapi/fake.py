@@ -307,8 +307,74 @@ class ResourcePool(ManagedObject):
     """Resource Pool class."""
 
     def __init__(self):
-        super(ResourcePool, self).__init__("ResourcePool")
-        self.set("name", "ResPool")
+        super(ResourcePool, self).__init__("ResourcePool",
+                                           value="resgroup-test")
+        self.set("name", "test_ResPool")
+        summary = DataObject()
+        runtime = DataObject()
+        config = DataObject()
+        memory = DataObject()
+        cpu = DataObject()
+
+        memoryAllocation = DataObject()
+        cpuAllocation = DataObject()
+
+        memory.maxUsage = 1000 * 1024 * 1024
+        memory.overallUsage = 500 * 1024 * 1024
+        cpu.maxUsage = 10000
+        cpu.overallUsage = 1000
+        runtime.cpu = cpu
+        runtime.memory = memory
+        summary.runtime = runtime
+        cpuAllocation.limit = 10000
+        memoryAllocation.limit = 1024
+        memoryAllocation.reservation = 1024
+        config.memoryAllocation = memoryAllocation
+        config.cpuAllocation = cpuAllocation
+        self.set("summary", summary)
+        self.set("config", config)
+        parent = ManagedObjectReference(value="domain-test",
+                                        _type="ResourcePool")
+        owner = ManagedObjectReference(value="domain-test",
+                                       _type="ResourcePool")
+        self.set("parent", parent)
+        self.set("owner", owner)
+
+
+class ClusterComputeResource(ManagedObject):
+    """Cluster class."""
+    def __init__(self, **kwargs):
+        super(ClusterComputeResource, self).__init__("ClusterComputeResource",
+                                                     value="domain-test")
+        res_pool_ref = (_db_content["ResourcePool"]
+                        [_db_content["ResourcePool"].keys()[0]].obj)
+        r_pool = DataObject()
+        r_pool.ManagedObjectReference = [res_pool_ref]
+        self.set("resourcePool", res_pool_ref)
+        host_ref = (_db_content["HostSystem"]
+                    [_db_content["HostSystem"].keys()[0]].obj)
+        host_sytem = DataObject()
+        host_sytem.ManagedObjectReference = [host_ref]
+        self.set("host", host_sytem)
+        self.set("name", "test_cluster")
+        self.set("summary.effectiveCpu", 10000)
+
+        ds_ref = (_db_content["Datastore"]
+                  [_db_content["Datastore"].keys()[0]].obj)
+        d_s = DataObject()
+        d_s.ManagedObjectReference = [ds_ref]
+        self.set("datastore", d_s)
+
+
+class DatastoreHostMount(DataObject):
+    def __init__(self):
+        super(DatastoreHostMount, self).__init__()
+        host_ref = (_db_content["HostSystem"]
+                    [_db_content["HostSystem"].keys()[0]].obj)
+        host_system = DataObject()
+        host_system.ManagedObjectReference = [host_ref]
+        host_system.value = 'host-100'
+        self.key = host_system
 
 
 class ClusterComputeResource(ManagedObject):
@@ -339,6 +405,10 @@ class Datastore(ManagedObject):
         self.set("summary.name", "fake-ds")
         self.set("summary.capacity", 1024 * 1024 * 1024 * 1024)
         self.set("summary.freeSpace", 500 * 1024 * 1024 * 1024)
+        self.set("summary.accessible", True)
+        datastore_host = DatastoreHostMount()
+        datastore_host.DatastoreHostMount = [datastore_host]
+        self.set('host', datastore_host)
 
 
 class HostNetworkSystem(ManagedObject):
@@ -376,6 +446,7 @@ class HostSystem(ManagedObject):
         hardware.numCpuThreads = 16
         hardware.vendor = "Intel"
         hardware.cpuModel = "Intel(R) Xeon(R)"
+        hardware.uuid = "host-uuid"
         hardware.memorySize = 1024 * 1024 * 1024
         summary.hardware = hardware
 
@@ -396,6 +467,9 @@ class HostSystem(ManagedObject):
         net_info_pnic.PhysicalNic = [pnic_do]
 
         self.set("summary", summary)
+        self.set("capability.maxHostSupportedVcpus", 600)
+        self.set("summary.runtime.inMaintenanceMode", False)
+        self.set("runtime.connectionState", "connected")
         self.set("config.network.pnic", net_info_pnic)
 
         if _db_content.get("Network", None) is None:
@@ -513,6 +587,11 @@ def create_datastore():
 def create_res_pool():
     res_pool = ResourcePool()
     _create_object('ResourcePool', res_pool)
+
+
+def create_cluster():
+    cluster = ClusterComputeResource()
+    _create_object('ClusterComputeResource', cluster)
 
 
 def create_network():

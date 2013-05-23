@@ -161,7 +161,9 @@ class VMwareVMOps(object):
             disk_type, vif_model) = _get_image_properties()
 
         vm_folder_ref = self._get_vmfolder_ref()
-        res_pool_ref = self._get_res_pool_ref()
+        nodename = instance['node'].partition('(')[0]
+        res_pool_ref = vm_util.get_res_pool_ref(self._session,
+                                                self._cluster, nodename)
 
         def _get_vif_infos():
             vif_infos = []

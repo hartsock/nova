@@ -82,13 +82,12 @@ vmwareapi_opts = [
                     'Used only if compute_driver is '
                     'vmwareapi.VMwareESXDriver or vmwareapi.VMwareVCDriver.',
                secret=True),
-    cfg.StrOpt('cluster_name',
+    cfg.MultiStrOpt('cluster_name',
                default=None,
                deprecated_name='vmwareapi_cluster_name',
                deprecated_group='DEFAULT',
-               help='Name of a VMware Cluster ComputeResource. '
-                    'Used only if compute_driver is '
-                    'vmwareapi.VMwareVCDriver.'),
+               help='Name of a VMware Cluster ComputeResource. Used only if '
+                    'compute_driver is vmwareapi.VMwareVCDriver.'),
     cfg.FloatOpt('task_poll_interval',
                  default=5.0,
                  deprecated_name='vmwareapi_task_poll_interval',
@@ -317,6 +316,19 @@ class VMwareESXDriver(driver.ComputeDriver):
                 'username': CONF.vmware.host_username,
                 'password': CONF.vmware.host_password}
 
+    def _get_available_resource(self, host_stats):
+        return {'vcpus': host_stats['vcpus'],
+                'memory_mb': host_stats['host_memory_total'],
+                'local_gb': host_stats['disk_total'],
+                'vcpus_used': 0,
+                'memory_mb_used': host_stats['host_memory_total'] -
+                                 host_stats['host_memory_free'],
+                'local_gb_used': host_stats['disk_used'],
+                'hypervisor_type': host_stats['hypervisor_type'],
+                'hypervisor_version': host_stats['hypervisor_version'],
+                'hypervisor_hostname': host_stats['hypervisor_hostname'],
+                'cpu_info': jsonutils.dumps(host_stats['cpu_info'])}
+
     def get_available_resource(self, nodename):
         """Retrieve resource info.
 
@@ -329,19 +341,7 @@ class VMwareESXDriver(driver.ComputeDriver):
         host_stats = self.get_host_stats(refresh=True)
 
         # Updating host information
-        dic = {'vcpus': host_stats["vcpus"],
-               'memory_mb': host_stats['host_memory_total'],
-               'local_gb': host_stats['disk_total'],
-               'vcpus_used': 0,
-               'memory_mb_used': host_stats['host_memory_total'] -
-                                 host_stats['host_memory_free'],
-               'local_gb_used': host_stats['disk_used'],
-               'hypervisor_type': host_stats['hypervisor_type'],
-               'hypervisor_version': host_stats['hypervisor_version'],
-               'hypervisor_hostname': host_stats['hypervisor_hostname'],
-               'cpu_info': jsonutils.dumps(host_stats['cpu_info'])}
-
-        return dic
+        return self._get_available_resource(host_stats)
 
     def update_host_status(self):
         """Update the status info of the host, and return those values
@@ -396,35 +396,37 @@ class VMwareVCDriver(VMwareESXDriver):
 
     def __init__(self, virtapi, read_only=False, scheme="https"):
         super(VMwareVCDriver, self).__init__(virtapi)
-        self._cluster_name = CONF.vmware.cluster_name
-        if not self._cluster_name:
-            self._cluster = None
-        else:
-            self._cluster = vm_util.get_cluster_ref_from_name(
-                            self._session, self._cluster_name)
-            if self._cluster is None:
-                raise exception.NotFound(_("VMware Cluster %s is not found")
-                                           % self._cluster_name)
-        self._volumeops = volumeops.VMwareVolumeOps(self._session,
-                                                    self._cluster)
-        self._vmops = vmops.VMwareVMOps(self._session, self.virtapi,
-                                        self._volumeops, self._cluster)
-        self._vc_state = None
 
-    @property
-    def host_state(self):
-        if not self._vc_state:
-            self._vc_state = host.VCState(self._session,
-                                          self._host_ip,
-                                          self._cluster)
-        return self._vc_state
+        # Get the list of clusters to be used
+        self._cluster_names = CONF.vmware.cluster_name
+        self.dict_mors = vm_util.get_all_cluster_refs_by_name(self._session,
+                                          self._cluster_names)
+
+        if len(self.dict_mors.keys()) == 0:
+            raise exception.NotFound(_("VMware Cluster %s is not found")
+                                     % self._cluster_names)
+
+        # The _ops_dict is used to maintain the vmops and volumeops objects
+        # per cluster. The dictionary is of the form
+        # {
+        #     domain-1000(MyCluster) : (vmops_obj, volumeops_obj, vcstate_obj),
+        #     resgroup-1000(MyRP) : (vmops_obj, volumeops_obj, vcstate_obj),
+        # }
+        self._ops_dict = {}
+        self._virtapi = virtapi
+        self._update_vmops_volumeops_dict()
+
+        # The following initialization is necessary since the base class does
+        # not use VC state.
+        first_cluster = self._ops_dict.keys()[0]
+        (self._vmops, self._volumeops, self._vc_state) = self._ops_dict.get(
+                                                                first_cluster)
 
     def migrate_disk_and_power_off(self, context, instance, dest,
                                    instance_type, network_info,
                                    block_device_info=None):
-        """
-        Transfers the disk of a running instance in multiple phases, turning
-        off the instance before the end.
+        """Transfers the disk of a running instance in multiple phases,
+        turning off the instance before the end.
         """
         return self._vmops.migrate_disk_and_power_off(context, instance,
                                                       dest, instance_type)
@@ -462,6 +464,151 @@ class VMwareVCDriver(VMwareESXDriver):
         # In specific, vCenter does not actually run the VNC service
         # itself. You must talk to the VNC host underneath vCenter.
         return self._vmops.get_vnc_console_vcenter(instance)
+
+    def _update_vmops_volumeops_dict(self):
+        """This method creates a dictionary that contains the VMwareVMOps,
+        VMwareVolumeOps and VCState object for each cluster/rp
+        The dictionary is of the form
+        {
+            domain-1000(MyCluster) : (vmops_obj, volumeops_obj, vcstate_obj),
+            resgroup-1000(MyRP) : (vmops_obj, volumeops_obj, vcstate_obj),
+        }
+
+        TODO(kirankv) we can avoid creating multiple vmops and volumeops
+        if we make them utility class so that cluster is passed as a
+        paramter to the method
+        """
+        added_nodes = set(self.dict_mors.keys()) - set(self._ops_dict.keys())
+        for node in added_nodes:
+            _volumeops = volumeops.VMwareVolumeOps(self._session,
+                                                   self.dict_mors[node][0])
+            _vmops = vmops.VMwareVMOps(self._session, self._virtapi,
+                                       _volumeops, self.dict_mors[node][0])
+            cluster_name = self.dict_mors.get(node)[2]
+            _vc_state = host.VCState(self._session,
+                                     self._get_nodename(node, cluster_name),
+                                     self.dict_mors.get(node)[0])
+            self._ops_dict[node] = (_vmops, _volumeops, _vc_state)
+        deleted_nodes = (set(self._ops_dict.keys()) -
+                            set(self.dict_mors.keys()))
+        for node in deleted_nodes:
+            del self._ops_dict[node]
+
+    def _get_nodename(self, mo_id, display_name):
+        """Creates the name that will be used to be stored in the
+        hypervisor_hostname column.
+        The name will be of the form similar to
+        domain-1000(MyCluster)
+        resgroup-1000(MyResourcePool)
+        """
+        return mo_id + '(' + display_name + ')'
+
+    def _get_mo_id(self, nodename):
+        return nodename.partition('(')[0]
+
+    def _get_display_name(self, nodename):
+        return nodename.partition('(')[2]
+
+    def _get_vmops_for_compute_node(self, nodename):
+        """Retrieve the vmops object from the mo_id stored in the
+        node name. Node name is of the form
+        domain-1000(MyCluster)
+        """
+        mo_id = self._get_mo_id(nodename)
+        return self._ops_dict.get(mo_id)[0]
+
+    def _get_volumeops_for_compute_node(self, nodename):
+        """Retrieve the vmops object from the mo_id stored in the
+        node name. Node name is of the form
+        domain-1000(MyCluster)
+        """
+        mo_id = self._get_mo_id(nodename)
+        return self._ops_dict.get(mo_id)[1]
+
+    def _get_vc_state_for_compute_node(self, nodename):
+        """Retrieve the VCState object from the mo_id stored in the
+        node name. Node name is of the form
+        domain-1000(MyCluster)
+        """
+        mo_id = self._get_mo_id(nodename)
+        return self._ops_dict.get(mo_id)[2]
+
+    def get_available_resource(self, nodename):
+        """Retrieve resource info.
+
+        This method is called when nova-compute launches, and
+        as part of a periodic task.
+
+        :returns: dictionary describing resources
+
+        """
+        stats_dict = {}
+        vc_state = self._get_vc_state_for_compute_node(nodename)
+        if vc_state:
+            host_stats = vc_state.get_host_stats(refresh=True)
+
+            # Updating host information
+            stats_dict = self._get_available_resource(host_stats)
+
+        else:
+            LOG.info(_("Invalid cluster or resource pool"
+                       " name : %s") % self._get_display_name(nodename))
+
+        return stats_dict
+
+    def get_available_nodes(self):
+        """Returns nodenames of all nodes managed by the compute service.
+
+        This method is for multi compute-nodes support. If a driver supports
+        multi compute-nodes, this method returns a list of nodenames managed
+        by the service. Otherwise, this method should return
+        [hypervisor_hostname].
+        """
+        self.dict_mors = vm_util.get_all_cluster_refs_by_name(
+                                self._session,
+                                CONF.vmware.cluster_name)
+        nodes = self.dict_mors.keys()
+        node_list = []
+        self._update_vmops_volumeops_dict()
+        for node in self.dict_mors.keys():
+            nodename = self._get_nodename(node, self.dict_mors.get(node)[2])
+            node_list.append(nodename)
+        LOG.debug(_("The available nodes are :%s") % node_list)
+        return node_list
+
+    def get_host_stats(self, refresh=True):
+        """Return currently known host stats."""
+        stats_list = []
+        nodes = self.get_available_nodes()
+        for node in nodes:
+            stats_list.append(self.get_available_resource(node))
+        return stats_list
+
+    def spawn(self, context, instance, image_meta, injected_files,
+              admin_password, network_info=None, block_device_info=None):
+        """Create VM instance."""
+        _vmops = self._get_vmops_for_compute_node(instance['node'])
+        _vmops.spawn(context, instance, image_meta, network_info,
+                          block_device_info)
+
+    def attach_volume(self, connection_info, instance, mountpoint):
+        """Attach volume storage to VM instance."""
+        _volumeops = self._get_volumeops_for_compute_node(instance['node'])
+        return _volumeops.attach_volume(connection_info,
+                                             instance,
+                                             mountpoint)
+
+    def detach_volume(self, connection_info, instance, mountpoint):
+        """Detach volume storage to VM instance."""
+        _volumeops = self._get_volumeops_for_compute_node(instance['node'])
+        return _volumeops.detach_volume(connection_info,
+                                             instance,
+                                             mountpoint)
+
+    def get_volume_connector(self, instance):
+        """Return volume connector information."""
+        _volumeops = self._get_volumeops_for_compute_node(instance['node'])
+        return _volumeops.get_volume_connector(instance)
 
 
 class VMwareAPISession(object):
@@ -534,8 +681,7 @@ class VMwareAPISession(object):
         return isinstance(module, vim.Vim)
 
     def _call_method(self, module, method, *args, **kwargs):
-        """
-        Calls a method within the module specified with
+        """Calls a method within the module specified with
         args provided.
         """
         args = list(args)
@@ -608,8 +754,7 @@ class VMwareAPISession(object):
         return self.vim
 
     def _wait_for_task(self, instance_uuid, task_ref):
-        """
-        Return a Deferred that will give the result of the given task.
+        """Return a Deferred that will give the result of the given task.
         The task is polled until it completes.
         """
         done = event.Event()
@@ -622,8 +767,7 @@ class VMwareAPISession(object):
         return ret_val
 
     def _poll_task(self, instance_uuid, task_ref, done):
-        """
-        Poll the given task, and fires the given Deferred if we
+        """Poll the given task, and fires the given Deferred if we
         get a result.
         """
         try:
