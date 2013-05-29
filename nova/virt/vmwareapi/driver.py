@@ -26,6 +26,7 @@ A connection to the VMware ESX platform.
 :vmwareapi_host_username:   Username for connection to VMware ESX/VC Server.
 :vmwareapi_host_password:   Password for connection to VMware ESX/VC Server.
 :vmwareapi_cluster_name:    Name of a VMware Cluster ComputeResource.
+:vmwareapi_datastore_regex: Regex to match the name of a datastore
 :vmwareapi_task_poll_interval: The interval (seconds) used for polling of
                             remote tasks
                             (default: 5.0).
@@ -38,6 +39,7 @@ A connection to the VMware ESX platform.
 :use_linked_clone:          Whether to use linked clone (default: True)
 """
 
+import re
 import time
 
 from eventlet import event
@@ -79,6 +81,11 @@ vmwareapi_opts = [
     cfg.StrOpt('vmwareapi_cluster_name',
                default=None,
                help='Name of a VMware Cluster ComputeResource. '
+                    'Used only if compute_driver is '
+                    'vmwareapi.VMwareVCDriver.'),
+    cfg.StrOpt('vmwareapi_datastore_regex',
+               default=None,
+               help='Regex to match the name of a datastore.'
                     'Used only if compute_driver is '
                     'vmwareapi.VMwareVCDriver.'),
     cfg.FloatOpt('vmwareapi_task_poll_interval',
@@ -348,10 +355,15 @@ class VMwareVCDriver(VMwareESXDriver):
             if self._cluster is None:
                 raise exception.NotFound(_("VMware Cluster %s is not found")
                                            % self._cluster_name)
+        self._datastore_regex = None
+        datastore_regex_str = CONF.vmwareapi_datastore_regex
+        if datastore_regex_str:
+            self._datastore_regex = re.compile(datastore_regex_str)
         self._volumeops = volumeops.VMwareVolumeOps(self._session,
                                                     self._cluster)
         self._vmops = vmops.VMwareVMOps(self._session, self.virtapi,
-                                        self._volumeops, self._cluster)
+                                        self._volumeops, self._cluster,
+                                        self._datastore_regex)
         self._vc_state = None
 
     @property
