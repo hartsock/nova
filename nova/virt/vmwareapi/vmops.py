@@ -39,6 +39,7 @@ from nova import exception
 from nova.openstack.common import excutils
 from nova.openstack.common.gettextutils import _
 from nova.openstack.common import log as logging
+from nova.utils import get_boolean
 from nova.virt import driver
 from nova.virt.vmwareapi import vif as vmwarevif
 from nova.virt.vmwareapi import vim_util
@@ -165,11 +166,21 @@ class VMwareVMOps(object):
                                              "preallocated")
             # Get the network card type from the image properties.
             vif_model = image_properties.get("hw_vif_model", "VirtualE1000")
+
+            image_linked_clone = image_properties.get(
+                "linked_clone", CONF.vmware.use_linked_clone)
+
             return (vmdk_file_size_in_kb, os_type, adapter_type, disk_type,
-                vif_model)
+                vif_model, image_linked_clone)
 
         (vmdk_file_size_in_kb, os_type, adapter_type,
-            disk_type, vif_model) = _get_image_properties()
+            disk_type, vif_model, image_linked_clone) = _get_image_properties()
+
+        # if linked_clone is specified on the instance, use that value instead
+        instance_linked_clone = self.get_instance_metadata_value(
+                            instance, 'linked_clone', image_linked_clone)
+
+        linked_clone = get_boolean(instance_linked_clone)
 
         vm_folder_ref = self._get_vmfolder_ref()
         res_pool_ref = self._get_res_pool_ref()
@@ -356,7 +367,6 @@ class VMwareVMOps(object):
                 self._default_root_device, block_device_info)
 
         if not ebs_root:
-            linked_clone = CONF.vmware.use_linked_clone
             if linked_clone:
                 upload_folder = self._instance_path_base
                 upload_name = instance['image_ref']
@@ -431,6 +441,32 @@ class VMwareVMOps(object):
             self._session._wait_for_task(instance['uuid'], power_on_task)
             LOG.debug(_("Powered on the VM instance"), instance=instance)
         _power_on_vm()
+
+    @staticmethod
+    def get_instance_metadata_value(instance, key, default=None):
+        '''Filters lists of metadata in an instance for a key.'''
+
+        try:
+            #TODO(hartsocks): This is a work-around
+            # db_fakes.py FakeModel object monkeys
+            # with the instance in odd ways.
+            if 'metadata' not in instance:
+                return default
+        except StandardError:
+            return default
+
+        dictionary_list = instance['metadata']
+
+        if not dictionary_list:
+            return default
+
+        value = default
+        for metadata in dictionary_list:
+            if key == metadata.get('key'):
+                value = metadata.get('value', default)
+                break
+
+        return value
 
     def snapshot(self, context, instance, snapshot_name, update_task_state):
         """Create snapshot from a running VM instance.
