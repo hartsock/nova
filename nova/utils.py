@@ -49,6 +49,7 @@ from nova.openstack.common import lockutils
 from nova.openstack.common import log as logging
 from nova.openstack.common import processutils
 from nova.openstack.common.rpc import common as rpc_common
+from nova.openstack.common import strutils
 from nova.openstack.common import timeutils
 
 notify_decorator = 'nova.openstack.common.notifier.api.notify_decorator'
@@ -1162,3 +1163,10 @@ def is_none_string(val):
 
 def convert_version_to_int(version):
     return version[0] * 1000000 + version[1] * 1000 + version[2]
+
+
+def get_boolean(value):
+    if isinstance(value, bool):
+        return value
+    else:
+        return strutils.bool_from_string(value)

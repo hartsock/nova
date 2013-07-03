@@ -22,6 +22,7 @@ Class for VM tasks like spawn, snapshot, suspend, resume etc.
 """
 
 import base64
+import collections
 import os
 import time
 import urllib
@@ -39,6 +40,7 @@ from nova import exception
 from nova.openstack.common import excutils
 from nova.openstack.common.gettextutils import _
 from nova.openstack.common import log as logging
+from nova.utils import get_boolean
 from nova.virt import driver
 from nova.virt.vmwareapi import vif as vmwarevif
 from nova.virt.vmwareapi import vim_util
@@ -160,6 +162,8 @@ class VMwareVMOps(object):
 
         (vmdk_file_size_in_kb, os_type, adapter_type,
             disk_type, vif_model) = _get_image_properties()
+
+        linked_clone = self.get_linked_clone_flag(context, instance)
 
         vm_folder_ref = self._get_vmfolder_ref()
         res_pool_ref = self._get_res_pool_ref()
@@ -346,7 +350,6 @@ class VMwareVMOps(object):
                 self._default_root_device, block_device_info)
 
         if not ebs_root:
-            linked_clone = CONF.vmware.use_linked_clone
             if linked_clone:
                 upload_folder = self._instance_path_base
                 upload_name = instance['image_ref']
@@ -421,6 +424,62 @@ class VMwareVMOps(object):
             self._session._wait_for_task(instance['uuid'], power_on_task)
             LOG.debug(_("Powered on the VM instance"), instance=instance)
         _power_on_vm()
+
+    def get_linked_clone_flag(self, context, instance):
+        '''Get the proper linked_clone flag for an instance
+
+        :param context: security context
+        :param instance: virtual machine instance
+        :return: bool for whether to use linked clone or not
+        '''
+
+        image_info = vmware_images.get_vmdk_size_and_properties(context,
+                                                    instance['image_ref'],
+                                                    instance)
+        image_size, image_properties = image_info
+
+        # get image's linked clone value, default to space-saving if not set
+        image_linked_clone = image_properties.get("linked_clone", True)
+
+        # if linked_clone is specified on the instance, use that value instead
+        linked_clone = self.get_instance_metadata_value(
+                            instance, 'linked_clone', image_linked_clone)
+
+        return get_boolean(linked_clone)
+
+    @staticmethod
+    def _get_instance_metadata(instance):
+        #TODO(hartsocks): db_fakes.py FakeModel is bad
+        # it makes us write code like this just to pass
+        # tests that use non-dictionary dictionaries in
+        # test but regular dictionaries in production.
+        try:
+            return instance.get('metadata', [])
+        except KeyError:
+            return []
+
+    @staticmethod
+    def get_instance_metadata_value(instance, key, default=None):
+        '''Filters instance metadata by a key for a value
+
+        :param instance: virtual machine instance
+        :param key: name of metadata attribute
+        :param default: value to return if not found
+        :return: the first value found associated with key
+        '''
+
+        dictionary_list = VMwareVMOps._get_instance_metadata(instance)
+
+        if not isinstance(dictionary_list, collections.Iterable):
+            return default
+
+        value = default
+        for metadata in dictionary_list:
+            if key == metadata.get('key'):
+                value = metadata.get('value', default)
+                break
+
+        return value
 
     def snapshot(self, context, instance, snapshot_name, update_task_state):
         """Create snapshot from a running VM instance.

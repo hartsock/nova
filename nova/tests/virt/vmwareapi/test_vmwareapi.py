@@ -110,7 +110,7 @@ class VMwareAPIVMTestCase(test.TestCase):
         self.flags(host_ip='test_url',
                    host_username='test_username',
                    host_password='test_pass',
-                   use_linked_clone=False, group='vmware')
+                   group='vmware')
         self.flags(vnc_enabled=False)
         self.user_id = 'fake'
         self.project_id = 'fake'
