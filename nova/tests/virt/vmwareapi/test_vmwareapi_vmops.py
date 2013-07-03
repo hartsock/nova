@@ -59,3 +59,69 @@ class VMwareVMOpsTestCase(test.TestCase):
         self.assertEqual(result,
                          'DE:AD:BE:EF:00:00;192.168.0.100;255.255.255.0;'
                          '192.168.0.1;192.168.0.255;192.168.0.1#')
+
+    def test_parse_metadata_from_instance_with_linked_clone_setting(self):
+        # an example of some metadata collected from the CLI
+        metadata_good = [{
+            'instance_uuid': 'a9c99d21-bbd3-4ef4-abab-d439efe183cf',
+            'deleted': 0, 'created_at': '2013-07-01T00:00:00.000000',
+            'updated_at': None, 'value': 'True',
+            'key': 'linked_clone', 'deleted_at': None, 'id': 123}]
+        # a dummy instance, we only care about metadata
+        instance = {'metadata': metadata_good}
+        # pull the raw value from the metadata,
+        # we don't care about type conversion yet.
+        # validate that the value is not overriden by the default
+        value = vmops.VMwareVMOps.get_instance_metadata_value(
+                                            instance, 'linked_clone', False)
+        self.assertEqual('True', value)
+        # validate that the default value doesn't break on "None"
+        value = vmops.VMwareVMOps.get_instance_metadata_value(
+                                            instance, 'linked_clone', None)
+        self.assertEqual('True', value)
+
+    def test_parse_metadata_from_instance_without_linked_clone_setting(self):
+        # here's some metadata that doesn't
+        # have the value we're looking for...
+        metadata_bad = [{
+            'instance_uuid': 'a9c99d21-bbd3-4ef4-abab-d439efe183cf',
+            'deleted': 0, 'created_at': '2013-07-01T00:00:00.000000',
+            'updated_at': None, 'value': 'True',
+            'key': 'something_else', 'deleted_at': None, 'id': 123}]
+        instance = {'metadata': metadata_bad}
+        # validate that the default instance shows through properly
+        value = vmops.VMwareVMOps.get_instance_metadata_value(
+                                    instance, 'linked_clone', 'False')
+        self.assertEqual('False', value)
+        # validate that 'None' shows through properly
+        value = vmops.VMwareVMOps.get_instance_metadata_value(
+                                    instance, 'linked_clone', None)
+        self.assertEqual(None, value)
+        # validate that a 'True' value shows through properly
+        value = vmops.VMwareVMOps.get_instance_metadata_value(
+                                    instance, 'linked_clone', 'True')
+        self.assertEqual('True', value)
+
+    def test_parse_metadata_from_instance_without_any_metadata(self):
+        instance = {'metadata': []}
+        # validate that an empty metadata list doesn't break things
+        value = vmops.VMwareVMOps.get_instance_metadata_value(
+                                    instance, 'linked_clone', 'False')
+        self.assertEqual('False', value)
+        value = vmops.VMwareVMOps.get_instance_metadata_value(
+                                        instance, 'linked_clone', None)
+        self.assertEqual(None, value)
+
+    def test_get_instance_metadata_value_with_malformed_instance(self):
+        instance = {'metadata': None}
+        # validate that a malformed instance doesn't break things
+        value = vmops.VMwareVMOps.get_instance_metadata_value(instance,
+                                                              'linked_clone',
+                                                              'False')
+        self.assertEqual('False', value)
+
+        # validate that a *really* malformed instance doesn't break things
+        value = vmops.VMwareVMOps.get_instance_metadata_value(None,
+                                                              'linked_clone',
+                                                              'False')
+        self.assertEqual('False', value)
