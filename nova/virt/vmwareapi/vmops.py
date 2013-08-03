@@ -22,6 +22,7 @@ Class for VM tasks like spawn, snapshot, suspend, resume etc.
 """
 
 import base64
+from collections import namedtuple
 import os
 import time
 import urllib
@@ -50,7 +51,7 @@ vmware_vif_opts = [
     cfg.StrOpt('integration_bridge',
                default='br-int',
                help='Name of Integration Bridge'),
-    ]
+]
 
 vmware_group = cfg.OptGroup(name='vmware',
                             title='VMware Options')
@@ -64,17 +65,27 @@ CONF.import_opt('vnc_enabled', 'nova.vnc')
 LOG = logging.getLogger(__name__)
 
 VMWARE_POWER_STATES = {
-                   'poweredOff': power_state.SHUTDOWN,
-                    'poweredOn': power_state.RUNNING,
-                    'suspended': power_state.SUSPENDED}
+    'poweredOff': power_state.SHUTDOWN,
+    'poweredOn': power_state.RUNNING,
+    'suspended': power_state.SUSPENDED}
 VMWARE_PREFIX = 'vmware'
-
 
 RESIZE_TOTAL_STEPS = 4
 
 
 class VMwareVMOps(object):
     """Management class for VM-related tasks."""
+
+    # a data structure for vmware image data
+    ImageProperties = namedtuple('ImageProperties', [
+        'vmdk_file_size_in_kb', 'adapter_type', 'disk_type',
+        'os_type', 'use_linked_clone', 'vif_model'
+    ])
+
+    VirtualMachineProperties = namedtuple('VirtualMachineProperties', [
+        'vm_folder_ref', 'res_pool_ref', 'vif_infos', 'config_spec',
+        'data_store_ref', 'data_store_name'
+    ])
 
     def __init__(self, session, virtapi, volumeops, cluster=None):
         """Initializer."""
@@ -92,8 +103,8 @@ class VMwareVMOps(object):
         """Lists the VM instances that are registered with the ESX host."""
         LOG.debug(_("Getting list of instances"))
         vms = self._session._call_method(vim_util, "get_objects",
-                     "VirtualMachine",
-                     ["name", "runtime.connectionState"])
+                                         "VirtualMachine",
+                                         ["name", "runtime.connectionState"])
         lst_vm_names = []
         for vm in vms:
             vm_name = None
@@ -103,11 +114,247 @@ class VMwareVMOps(object):
                     vm_name = prop.val
                 elif prop.name == "runtime.connectionState":
                     conn_state = prop.val
-            # Ignoring the orphaned or inaccessible VMs
+                # Ignoring the orphaned or inaccessible VMs
             if conn_state not in ["orphaned", "inaccessible"]:
                 lst_vm_names.append(vm_name)
         LOG.debug(_("Got total of %s instances") % str(len(lst_vm_names)))
         return lst_vm_names
+
+    def get_instance_image_properties(self, context, instance):
+        """
+        Get the Size of the flat vmdk file that is there on the storage
+        repository.
+        """
+        _image_info = vmware_images.get_vmdk_size_and_properties(context,
+                                                                 instance['image_ref'],
+                                                                 instance)
+        image_size, image_properties = _image_info
+        vmdk_file_size_in_kb = int(image_size) / 1024
+        os_type = image_properties.get("vmware_ostype", "otherGuest")
+        adapter_type = image_properties.get("vmware_adaptertype",
+                                            "lsiLogic")
+        disk_type = image_properties.get("vmware_disktype",
+                                         "preallocated")
+        # Get the network card type from the image properties.
+        vif_model = image_properties.get("hw_vif_model", "VirtualE1000")
+        return VMwareVMOps.ImageProperties(
+            vmdk_file_size_in_kb=vmdk_file_size_in_kb,
+            os_type=os_type,
+            adapter_type=adapter_type,
+            disk_type=disk_type,
+            vif_model=vif_model,
+            use_linked_clone=CONF.vmware.use_linked_clone
+        )
+
+    def get_vif_infos(self, network_info, vif_model):
+        if network_info is None:
+            return []
+
+        vif_infos = []
+        for vif in network_info:
+            mac_address = vif['address']
+            network_name = vif['network']['bridge'] or \
+                           CONF.vmware.integration_bridge
+            if vif['network'].get_meta('should_create_vlan', False):
+                network_ref = vmwarevif.ensure_vlan_bridge(
+                    self._session, vif,
+                    self._cluster)
+            else:
+                # FlatDHCP network without vlan.
+                network_ref = vmwarevif.ensure_vlan_bridge(
+                    self._session, vif, self._cluster, create_vlan=False)
+
+            vif_infos.append({'network_name': network_name,
+                              'mac_address': mac_address,
+                              'network_ref': network_ref,
+                              'iface_id': vif['id'],
+                              'vif_model': vif_model
+            })
+        return vif_infos
+
+    def get_vm_props(self, client_factory, instance, image_properties, network_info):
+        ds = vm_util.get_datastore_ref_and_name(self._session, self._cluster)
+        data_store_ref = ds[0]
+        data_store_name = ds[1]
+
+        vm_folder_ref = self._get_vmfolder_ref()
+        res_pool_ref = self._get_res_pool_ref()
+        vif_infos = self.get_vif_infos(
+            network_info, image_properties.vif_model)
+
+        # Get the create vm config spec
+        config_spec = vm_util.get_vm_create_spec(
+            client_factory, instance,
+            data_store_name, vif_infos, image_properties.os_type)
+
+        return VMwareVMOps.VirtualMachineProperties(
+            vm_folder_ref=vm_folder_ref,
+            res_pool_ref=res_pool_ref,
+            vif_infos=vif_infos,
+            config_spec=config_spec,
+            data_store_ref=data_store_ref,
+            data_store_name=data_store_name,
+        )
+
+    def create_vm(self, instance, vm_props):
+        """Create VM on ESX host."""
+        LOG.debug(_("Creating VM on the ESX host"), instance=instance)
+        # Create the VM on the ESX host
+        vm_create_task = self._session._call_method(
+            self._session._get_vim(),
+            "CreateVM_Task", vm_props.vm_folder_ref,
+            config=vm_props.config_spec, pool=vm_props.res_pool_ref)
+        self._session._wait_for_task(instance['uuid'], vm_create_task)
+
+        LOG.debug(_("Created VM on the ESX host"), instance=instance)
+        return vm_util.get_vm_ref(self._session, instance)
+
+
+    def create_virtual_disk(self, client_factory, instance, image_properties, data_store_name, service_content,
+                            uploaded_vmdk_path, dc_ref):
+        """Create a virtual disk of the size of flat vmdk file.
+        :param client_factory:
+        :param instance:
+        :param image_properties:
+        :param data_store_name:
+        :param service_content:
+        :param uploaded_vmdk_path:
+        :param dc_ref:
+        """
+        # Create a Virtual Disk of the size of the flat vmdk file. This is
+        # done just to generate the meta-data file whose specifics
+        # depend on the size of the disk, thin/thick provisioning and the
+        # storage adapter type.
+        # Here we assume thick provisioning and lsiLogic for the adapter
+        # type
+        LOG.debug(_("Creating Virtual Disk of size  "
+                    "%(vmdk_file_size_in_kb)s KB and adapter type "
+                    "%(adapter_type)s on the ESX host local store "
+                    "%(data_store_name)s") %
+                  {"vmdk_file_size_in_kb": image_properties.vmdk_file_size_in_kb,
+                   "adapter_type": image_properties.adapter_type,
+                   "data_store_name": data_store_name},
+                  instance=instance)
+        vmdk_create_spec = vm_util.get_vmdk_create_spec(client_factory,
+                                                        image_properties.vmdk_file_size_in_kb,
+                                                        image_properties.adapter_type,
+                                                        image_properties.disk_type)
+        vmdk_create_task = self._session._call_method(
+            self._session._get_vim(),
+            "CreateVirtualDisk_Task",
+            service_content.virtualDiskManager,
+            name=uploaded_vmdk_path,
+            datacenter=dc_ref,
+            spec=vmdk_create_spec)
+        self._session._wait_for_task(instance['uuid'], vmdk_create_task)
+        LOG.debug(_("Created Virtual Disk of size %(vmdk_file_size_in_kb)s"
+                    " KB and type %(disk_type)s on "
+                    "the ESX host local store %(data_store_name)s") %
+                  {"vmdk_file_size_in_kb": image_properties.vmdk_file_size_in_kb,
+                   "disk_type": image_properties.disk_type,
+                   "data_store_name": data_store_name},
+                  instance=instance)
+
+    def delete_disk_file(self, vmdk_path, instance, data_store_name, service_content, dc_ref):
+        LOG.debug(_("Deleting the file %(vmdk_path)s "
+                    "on the ESX host local"
+                    "store %(data_store_name)s") %
+                  {"vmdk_path": vmdk_path,
+                   "data_store_name": data_store_name},
+                  instance=instance)
+        # Delete the vmdk file.
+        vmdk_delete_task = self._session._call_method(
+            self._session._get_vim(),
+            "DeleteDatastoreFile_Task",
+            service_content.fileManager,
+            name=vmdk_path,
+            datacenter=dc_ref)
+        self._session._wait_for_task(instance['uuid'], vmdk_delete_task)
+        LOG.debug(_("Deleted the file %(vmdk_path)s on the "
+                    "ESX host local store %(data_store_name)s") %
+                  {"vmdk_path": vmdk_path,
+                   "data_store_name": data_store_name},
+                  instance=instance)
+
+
+    def fetch_image_on_esx_datastore(self, context, cookies, instance, image_properties, data_store_name,
+                                     flat_uploaded_vmdk_name, sparse_uploaded_vmdk_name):
+        """Fetch image from Glance to ESX datastore."""
+        LOG.debug(_("Downloading image file data %(image_ref)s to the ESX "
+                    "data store %(data_store_name)s") %
+                  {'image_ref': instance['image_ref'],
+                   'data_store_name': data_store_name},
+                  instance=instance)
+        # For flat disk, upload the -flat.vmdk file whose meta-data file
+        # we just created above
+        # For sparse disk, upload the -sparse.vmdk file to be copied into
+        # a flat vmdk
+        upload_vmdk_name = sparse_uploaded_vmdk_name if image_properties.disk_type == "sparse" else flat_uploaded_vmdk_name
+        vmware_images.fetch_image(
+            context,
+            instance['image_ref'],
+            instance,
+            host=self._session._host_ip,
+            data_center_name=self._get_datacenter_ref_and_name()[1],
+            datastore_name=data_store_name,
+            cookies=cookies,
+            file_path=upload_vmdk_name)
+        LOG.debug(_("Downloaded image file data %(image_ref)s to "
+                    "%(upload_vmdk_name)s on the ESX data store "
+                    "%(data_store_name)s") %
+                  {'image_ref': instance['image_ref'],
+                   'upload_vmdk_name': upload_vmdk_name,
+                   'data_store_name': data_store_name},
+                  instance=instance)
+
+    def copy_virtual_disk(self, client_factory, service_content, instance, image_properties, data_store_name,
+                          sparse_uploaded_vmdk_path, uploaded_vmdk_path):
+        """Copy a sparse virtual disk to a thin virtual disk."""
+        # Copy a sparse virtual disk to a thin virtual disk. This is also
+        # done to generate the meta-data file whose specifics
+        # depend on the size of the disk, thin/thick provisioning and the
+        # storage adapter type.
+        LOG.debug(_("Copying Virtual Disk of size "
+                    "%(vmdk_file_size_in_kb)s KB and adapter type "
+                    "%(adapter_type)s on the ESX host local store "
+                    "%(data_store_name)s to disk type %(disk_type)s") %
+                  {"vmdk_file_size_in_kb":
+                       image_properties.vmdk_file_size_in_kb,
+                   "adapter_type": image_properties.adapter_type,
+                   "data_store_name": data_store_name,
+                   "disk_type": image_properties.disk_type},
+                  instance=instance)
+        vmdk_copy_spec = vm_util.get_vmdk_create_spec(client_factory,
+                                                      image_properties.vmdk_file_size_in_kb,
+                                                      image_properties.adapter_type,
+                                                      image_properties.disk_type)
+        vmdk_copy_task = self._session._call_method(
+            self._session._get_vim(),
+            "CopyVirtualDisk_Task",
+            service_content.virtualDiskManager,
+            sourceName=sparse_uploaded_vmdk_path,
+            sourceDatacenter=self._get_datacenter_ref_and_name()[0],
+            destName=uploaded_vmdk_path,
+            destSpec=vmdk_copy_spec)
+        self._session._wait_for_task(instance['uuid'], vmdk_copy_task)
+        LOG.debug(_("Copied Virtual Disk of size %(vmdk_file_size_in_kb)s"
+                    " KB and type %(disk_type)s on "
+                    "the ESX host local store %(data_store_name)s") %
+                  {"vmdk_file_size_in_kb": image_properties.vmdk_file_size_in_kb,
+                   "disk_type": image_properties.disk_type,
+                   "data_store_name": data_store_name},
+                  instance=instance)
+
+    def power_on_vm(self, instance, vm_ref):
+        """Power on the VM."""
+        LOG.debug(_("Powering on the VM instance"), instance=instance)
+        # Power On the VM
+        power_on_task = self._session._call_method(
+            self._session._get_vim(),
+            "PowerOnVM_Task", vm_ref)
+        self._session._wait_for_task(instance['uuid'], power_on_task)
+        LOG.debug(_("Powered on the VM instance"), instance=instance)
+
 
     def spawn(self, context, instance, image_meta, network_info,
               block_device_info=None):
@@ -134,81 +381,13 @@ class VMwareVMOps(object):
 
         client_factory = self._session._get_vim().client.factory
         service_content = self._session._get_vim().get_service_content()
-        ds = vm_util.get_datastore_ref_and_name(self._session, self._cluster)
-        data_store_ref = ds[0]
-        data_store_name = ds[1]
 
-        def _get_image_properties():
-            """
-            Get the Size of the flat vmdk file that is there on the storage
-            repository.
-            """
-            _image_info = vmware_images.get_vmdk_size_and_properties(context,
-                                                        instance['image_ref'],
-                                                        instance)
-            image_size, image_properties = _image_info
-            vmdk_file_size_in_kb = int(image_size) / 1024
-            os_type = image_properties.get("vmware_ostype", "otherGuest")
-            adapter_type = image_properties.get("vmware_adaptertype",
-                                                "lsiLogic")
-            disk_type = image_properties.get("vmware_disktype",
-                                             "preallocated")
-            # Get the network card type from the image properties.
-            vif_model = image_properties.get("hw_vif_model", "VirtualE1000")
-            return (vmdk_file_size_in_kb, os_type, adapter_type, disk_type,
-                vif_model)
+        image_props = self.get_instance_image_properties(context, instance)
 
-        (vmdk_file_size_in_kb, os_type, adapter_type,
-            disk_type, vif_model) = _get_image_properties()
+        vm_props = self.get_vm_props(
+            client_factory, instance, image_props, network_info)
 
-        vm_folder_ref = self._get_vmfolder_ref()
-        res_pool_ref = self._get_res_pool_ref()
-
-        def _get_vif_infos():
-            vif_infos = []
-            if network_info is None:
-                return vif_infos
-            for vif in network_info:
-                mac_address = vif['address']
-                network_name = vif['network']['bridge'] or \
-                               CONF.vmware.integration_bridge
-                if vif['network'].get_meta('should_create_vlan', False):
-                    network_ref = vmwarevif.ensure_vlan_bridge(
-                                                        self._session, vif,
-                                                        self._cluster)
-                else:
-                    # FlatDHCP network without vlan.
-                    network_ref = vmwarevif.ensure_vlan_bridge(
-                        self._session, vif, self._cluster, create_vlan=False)
-                vif_infos.append({'network_name': network_name,
-                                  'mac_address': mac_address,
-                                  'network_ref': network_ref,
-                                  'iface_id': vif['id'],
-                                  'vif_model': vif_model
-                                 })
-            return vif_infos
-
-        vif_infos = _get_vif_infos()
-
-        # Get the create vm config spec
-        config_spec = vm_util.get_vm_create_spec(
-                            client_factory, instance,
-                            data_store_name, vif_infos, os_type)
-
-        def _execute_create_vm():
-            """Create VM on ESX host."""
-            LOG.debug(_("Creating VM on the ESX host"), instance=instance)
-            # Create the VM on the ESX host
-            vm_create_task = self._session._call_method(
-                                    self._session._get_vim(),
-                                    "CreateVM_Task", vm_folder_ref,
-                                    config=config_spec, pool=res_pool_ref)
-            self._session._wait_for_task(instance['uuid'], vm_create_task)
-
-            LOG.debug(_("Created VM on the ESX host"), instance=instance)
-
-        _execute_create_vm()
-        vm_ref = vm_util.get_vm_ref(self._session, instance)
+        vm_ref = self.create_vm(instance, vm_props)
 
         # Set the machine.id parameter of the instance to inject
         # the NIC configuration inside the VM
@@ -221,129 +400,8 @@ class VMwareVMOps(object):
             vnc_pass = CONF.vmware.vnc_password or ''
             self._set_vnc_config(client_factory, instance, vnc_port, vnc_pass)
 
-        def _create_virtual_disk():
-            """Create a virtual disk of the size of flat vmdk file."""
-            # Create a Virtual Disk of the size of the flat vmdk file. This is
-            # done just to generate the meta-data file whose specifics
-            # depend on the size of the disk, thin/thick provisioning and the
-            # storage adapter type.
-            # Here we assume thick provisioning and lsiLogic for the adapter
-            # type
-            LOG.debug(_("Creating Virtual Disk of size  "
-                      "%(vmdk_file_size_in_kb)s KB and adapter type "
-                      "%(adapter_type)s on the ESX host local store "
-                      "%(data_store_name)s") %
-                       {"vmdk_file_size_in_kb": vmdk_file_size_in_kb,
-                        "adapter_type": adapter_type,
-                        "data_store_name": data_store_name},
-                      instance=instance)
-            vmdk_create_spec = vm_util.get_vmdk_create_spec(client_factory,
-                                    vmdk_file_size_in_kb, adapter_type,
-                                    disk_type)
-            vmdk_create_task = self._session._call_method(
-                self._session._get_vim(),
-                "CreateVirtualDisk_Task",
-                service_content.virtualDiskManager,
-                name=uploaded_vmdk_path,
-                datacenter=dc_ref,
-                spec=vmdk_create_spec)
-            self._session._wait_for_task(instance['uuid'], vmdk_create_task)
-            LOG.debug(_("Created Virtual Disk of size %(vmdk_file_size_in_kb)s"
-                        " KB and type %(disk_type)s on "
-                        "the ESX host local store %(data_store_name)s") %
-                        {"vmdk_file_size_in_kb": vmdk_file_size_in_kb,
-                         "disk_type": disk_type,
-                         "data_store_name": data_store_name},
-                      instance=instance)
-
-        def _delete_disk_file(vmdk_path):
-            LOG.debug(_("Deleting the file %(vmdk_path)s "
-                        "on the ESX host local"
-                        "store %(data_store_name)s") %
-                        {"vmdk_path": vmdk_path,
-                         "data_store_name": data_store_name},
-                      instance=instance)
-            # Delete the vmdk file.
-            vmdk_delete_task = self._session._call_method(
-                        self._session._get_vim(),
-                        "DeleteDatastoreFile_Task",
-                        service_content.fileManager,
-                        name=vmdk_path,
-                        datacenter=dc_ref)
-            self._session._wait_for_task(instance['uuid'], vmdk_delete_task)
-            LOG.debug(_("Deleted the file %(vmdk_path)s on the "
-                        "ESX host local store %(data_store_name)s") %
-                        {"vmdk_path": vmdk_path,
-                         "data_store_name": data_store_name},
-                      instance=instance)
-
-        def _fetch_image_on_esx_datastore():
-            """Fetch image from Glance to ESX datastore."""
-            LOG.debug(_("Downloading image file data %(image_ref)s to the ESX "
-                        "data store %(data_store_name)s") %
-                        {'image_ref': instance['image_ref'],
-                         'data_store_name': data_store_name},
-                      instance=instance)
-            # For flat disk, upload the -flat.vmdk file whose meta-data file
-            # we just created above
-            # For sparse disk, upload the -sparse.vmdk file to be copied into
-            # a flat vmdk
-            upload_vmdk_name = sparse_uploaded_vmdk_name \
-                if disk_type == "sparse" else flat_uploaded_vmdk_name
-            vmware_images.fetch_image(
-                context,
-                instance['image_ref'],
-                instance,
-                host=self._session._host_ip,
-                data_center_name=self._get_datacenter_ref_and_name()[1],
-                datastore_name=data_store_name,
-                cookies=cookies,
-                file_path=upload_vmdk_name)
-            LOG.debug(_("Downloaded image file data %(image_ref)s to "
-                        "%(upload_vmdk_name)s on the ESX data store "
-                        "%(data_store_name)s") %
-                        {'image_ref': instance['image_ref'],
-                         'upload_vmdk_name': upload_vmdk_name,
-                         'data_store_name': data_store_name},
-                      instance=instance)
-
-        def _copy_virtual_disk():
-            """Copy a sparse virtual disk to a thin virtual disk."""
-            # Copy a sparse virtual disk to a thin virtual disk. This is also
-            # done to generate the meta-data file whose specifics
-            # depend on the size of the disk, thin/thick provisioning and the
-            # storage adapter type.
-            LOG.debug(_("Copying Virtual Disk of size "
-                      "%(vmdk_file_size_in_kb)s KB and adapter type "
-                      "%(adapter_type)s on the ESX host local store "
-                      "%(data_store_name)s to disk type %(disk_type)s") %
-                       {"vmdk_file_size_in_kb": vmdk_file_size_in_kb,
-                        "adapter_type": adapter_type,
-                        "data_store_name": data_store_name,
-                        "disk_type": disk_type},
-                      instance=instance)
-            vmdk_copy_spec = vm_util.get_vmdk_create_spec(client_factory,
-                                    vmdk_file_size_in_kb, adapter_type,
-                                    disk_type)
-            vmdk_copy_task = self._session._call_method(
-                self._session._get_vim(),
-                "CopyVirtualDisk_Task",
-                service_content.virtualDiskManager,
-                sourceName=sparse_uploaded_vmdk_path,
-                sourceDatacenter=self._get_datacenter_ref_and_name()[0],
-                destName=uploaded_vmdk_path,
-                destSpec=vmdk_copy_spec)
-            self._session._wait_for_task(instance['uuid'], vmdk_copy_task)
-            LOG.debug(_("Copied Virtual Disk of size %(vmdk_file_size_in_kb)s"
-                        " KB and type %(disk_type)s on "
-                        "the ESX host local store %(data_store_name)s") %
-                        {"vmdk_file_size_in_kb": vmdk_file_size_in_kb,
-                         "disk_type": disk_type,
-                         "data_store_name": data_store_name},
-                        instance=instance)
-
         ebs_root = block_device.volume_in_mapping(
-                self._default_root_device, block_device_info)
+            self._default_root_device, block_device_info)
 
         if not ebs_root:
             linked_clone = CONF.vmware.use_linked_clone
@@ -356,71 +414,68 @@ class VMwareVMOps(object):
 
             # The vmdk meta-data file
             uploaded_vmdk_name = "%s/%s.vmdk" % (upload_folder, upload_name)
-            uploaded_vmdk_path = vm_util.build_datastore_path(data_store_name,
-                                                uploaded_vmdk_name)
+            uploaded_vmdk_path = vm_util.build_datastore_path(vm_props.data_store_name,
+                                                              uploaded_vmdk_name)
 
             if not (linked_clone and self._check_if_folder_file_exists(
-                                        data_store_ref, data_store_name,
-                                        upload_folder, upload_name + ".vmdk")):
+                    vm_props.data_store_ref, vm_props.data_store_name,
+                    upload_folder, upload_name + ".vmdk")):
 
                 # Naming the VM files in correspondence with the VM instance
                 # The flat vmdk file name
                 flat_uploaded_vmdk_name = "%s/%s-flat.vmdk" % (
-                                            upload_folder, upload_name)
+                    upload_folder, upload_name)
                 # The sparse vmdk file name for sparse disk image
                 sparse_uploaded_vmdk_name = "%s/%s-sparse.vmdk" % (
-                                            upload_folder, upload_name)
+                    upload_folder, upload_name)
 
                 flat_uploaded_vmdk_path = vm_util.build_datastore_path(
-                                                    data_store_name,
-                                                    flat_uploaded_vmdk_name)
+                    vm_props.data_store_name,
+                    flat_uploaded_vmdk_name)
                 sparse_uploaded_vmdk_path = vm_util.build_datastore_path(
-                                                    data_store_name,
-                                                    sparse_uploaded_vmdk_name)
+                    vm_props.data_store_name,
+                    sparse_uploaded_vmdk_name)
                 dc_ref = self._get_datacenter_ref_and_name()[0]
 
-                if disk_type != "sparse":
-                   # Create a flat virtual disk and retain the metadata file.
-                    _create_virtual_disk()
-                    _delete_disk_file(flat_uploaded_vmdk_path)
+                if image_props.disk_type != "sparse":
+                # Create a flat virtual disk and retain the metadata file.
+                    self.create_virtual_disk(client_factory, instance, image_props, vm_props.data_store_name,
+                                             service_content,
+                                             uploaded_vmdk_path, dc_ref)
+                    self.delete_disk_file(flat_uploaded_vmdk_path, instance, vm_props.data_store_name, service_content,
+                                          dc_ref)
 
-                cookies = \
-                    self._session._get_vim().client.options.transport.cookiejar
-                _fetch_image_on_esx_datastore()
+                cookies = self._session._get_vim().client.options.transport.cookiejar
+                self.fetch_image_on_esx_datastore(context, cookies, instance, image_props, vm_props.data_store_name,
+                                     flat_uploaded_vmdk_name, sparse_uploaded_vmdk_name)
 
-                if disk_type == "sparse":
+                if image_props.disk_type == "sparse":
                     # Copy the sparse virtual disk to a thin virtual disk.
                     disk_type = "thin"
-                    _copy_virtual_disk()
-                    _delete_disk_file(sparse_uploaded_vmdk_path)
+                    self.copy_virtual_disk(client_factory, service_content, instance, image_props,
+                                           vm_props.data_store_name,
+                                           sparse_uploaded_vmdk_path, uploaded_vmdk_path)
+                    self.delete_disk_file(sparse_uploaded_vmdk_path, instance, vm_props.data_store_name,
+                                          service_content, dc_ref)
             else:
                 # linked clone base disk exists
-                if disk_type == "sparse":
+                if image_props.disk_type == "sparse":
                     disk_type = "thin"
 
             # Attach the vmdk uploaded to the VM.
             self._volumeops.attach_disk_to_vm(
-                                vm_ref, instance,
-                                adapter_type, disk_type, uploaded_vmdk_path,
-                                vmdk_file_size_in_kb, linked_clone)
+                vm_ref, instance,
+                image_props.adapter_type, image_props.disk_type, uploaded_vmdk_path,
+                image_props.vmdk_file_size_in_kb, linked_clone)
         else:
             # Attach the root disk to the VM.
             root_disk = driver.block_device_info_get_mapping(
-                           block_device_info)[0]
+                block_device_info)[0]
             connection_info = root_disk['connection_info']
             self._volumeops.attach_volume(connection_info, instance['uuid'],
                                           self._default_root_device)
 
-        def _power_on_vm():
-            """Power on the VM."""
-            LOG.debug(_("Powering on the VM instance"), instance=instance)
-            # Power On the VM
-            power_on_task = self._session._call_method(
-                               self._session._get_vim(),
-                               "PowerOnVM_Task", vm_ref)
-            self._session._wait_for_task(instance['uuid'], power_on_task)
-            LOG.debug(_("Powered on the VM instance"), instance=instance)
-        _power_on_vm()
+        self.power_on_vm(instance, vm_ref)
 
     def snapshot(self, context, instance, snapshot_name, update_task_state):
         """Create snapshot from a running VM instance.
@@ -444,16 +499,16 @@ class VMwareVMOps(object):
         def _get_vm_and_vmdk_attribs():
             # Get the vmdk file name that the VM is pointing to
             hardware_devices = self._session._call_method(vim_util,
-                        "get_dynamic_property", vm_ref,
-                        "VirtualMachine", "config.hardware.device")
+                                                          "get_dynamic_property", vm_ref,
+                                                          "VirtualMachine", "config.hardware.device")
             (vmdk_file_path_before_snapshot, controller_key, adapter_type,
              disk_type, unit_number) = vm_util.get_vmdk_path_and_adapter_type(
-                                        hardware_devices)
+                hardware_devices)
             datastore_name = vm_util.split_datastore_path(
-                                        vmdk_file_path_before_snapshot)[0]
+                vmdk_file_path_before_snapshot)[0]
             os_type = self._session._call_method(vim_util,
-                        "get_dynamic_property", vm_ref,
-                        "VirtualMachine", "summary.config.guestId")
+                                                 "get_dynamic_property", vm_ref,
+                                                 "VirtualMachine", "summary.config.guestId")
             return (vmdk_file_path_before_snapshot, adapter_type, disk_type,
                     datastore_name, os_type)
 
@@ -465,12 +520,12 @@ class VMwareVMOps(object):
             LOG.debug(_("Creating Snapshot of the VM instance"),
                       instance=instance)
             snapshot_task = self._session._call_method(
-                        self._session._get_vim(),
-                        "CreateSnapshot_Task", vm_ref,
-                        name="%s-snapshot" % instance['uuid'],
-                        description="Taking Snapshot of the VM",
-                        memory=False,
-                        quiesce=True)
+                self._session._get_vim(),
+                "CreateSnapshot_Task", vm_ref,
+                name="%s-snapshot" % instance['uuid'],
+                description="Taking Snapshot of the VM",
+                memory=False,
+                quiesce=True)
             self._session._wait_for_task(instance['uuid'], snapshot_task)
             LOG.debug(_("Created Snapshot of the VM instance"),
                       instance=instance)
@@ -482,18 +537,18 @@ class VMwareVMOps(object):
             # Copy the contents of the VM that were there just before the
             # snapshot was taken
             ds_ref_ret = vim_util.get_dynamic_property(
-                                    self._session._get_vim(),
-                                    vm_ref,
-                                    "VirtualMachine",
-                                    "datastore")
+                self._session._get_vim(),
+                vm_ref,
+                "VirtualMachine",
+                "datastore")
             if ds_ref_ret is None:
                 raise exception.DatastoreNotFound()
             ds_ref = ds_ref_ret.ManagedObjectReference[0]
             ds_browser = vim_util.get_dynamic_property(
-                                       self._session._get_vim(),
-                                       ds_ref,
-                                       "Datastore",
-                                       "browser")
+                self._session._get_vim(),
+                ds_ref,
+                "Datastore",
+                "browser")
             # Check if the vmware-tmp folder exists or not. If not, create one
             tmp_folder_path = vm_util.build_datastore_path(datastore_name,
                                                            "vmware-tmp")
@@ -508,7 +563,7 @@ class VMwareVMOps(object):
         # name clashes.
         random_name = str(uuid.uuid4())
         dest_vmdk_file_location = vm_util.build_datastore_path(datastore_name,
-                   "vmware-tmp/%s.vmdk" % random_name)
+                                                               "vmware-tmp/%s.vmdk" % random_name)
         dc_ref = self._get_datacenter_ref_and_name()[0]
 
         def _copy_vmdk_content():
@@ -567,7 +622,7 @@ class VMwareVMOps(object):
             """
             # Delete the temporary vmdk created above.
             LOG.debug(_("Deleting temporary vmdk file %s")
-                        % dest_vmdk_file_location, instance=instance)
+                      % dest_vmdk_file_location, instance=instance)
             remove_disk_task = self._session._call_method(
                 self._session._get_vim(),
                 "DeleteVirtualDisk_Task",
@@ -576,7 +631,7 @@ class VMwareVMOps(object):
                 datacenter=dc_ref)
             self._session._wait_for_task(instance['uuid'], remove_disk_task)
             LOG.debug(_("Deleted temporary vmdk file %s")
-                        % dest_vmdk_file_location, instance=instance)
+                      % dest_vmdk_file_location, instance=instance)
 
         _clean_temp_data()
 
@@ -588,8 +643,8 @@ class VMwareVMOps(object):
         lst_properties = ["summary.guest.toolsStatus", "runtime.powerState",
                           "summary.guest.toolsRunningStatus"]
         props = self._session._call_method(vim_util, "get_object_properties",
-                           None, vm_ref, "VirtualMachine",
-                           lst_properties)
+                                           None, vm_ref, "VirtualMachine",
+                                           lst_properties)
         pwr_state = None
         tools_status = None
         tools_running_status = False
@@ -610,7 +665,7 @@ class VMwareVMOps(object):
         # If latest vmware tools are installed in the VM, and that the tools
         # are running, then only do a guest reboot. Otherwise do a hard reset.
         if (tools_status == "toolsOk" and
-                tools_running_status == "guestToolsRunning"):
+                    tools_running_status == "guestToolsRunning"):
             LOG.debug(_("Rebooting guest OS of VM"), instance=instance)
             self._session._call_method(self._session._get_vim(), "RebootGuest",
                                        vm_ref)
@@ -658,8 +713,8 @@ class VMwareVMOps(object):
             vm_ref = vm_util.get_vm_ref(self._session, instance)
             lst_properties = ["config.files.vmPathName", "runtime.powerState"]
             props = self._session._call_method(vim_util,
-                        "get_object_properties",
-                        None, vm_ref, "VirtualMachine", lst_properties)
+                                               "get_object_properties",
+                                               None, vm_ref, "VirtualMachine", lst_properties)
             pwr_state = None
             for elem in props:
                 vm_config_pathname = None
@@ -671,12 +726,12 @@ class VMwareVMOps(object):
             if vm_config_pathname:
                 _ds_path = vm_util.split_datastore_path(vm_config_pathname)
                 datastore_name, vmx_file_path = _ds_path
-            # Power off the VM if it is in PoweredOn state.
+                # Power off the VM if it is in PoweredOn state.
             if pwr_state == "poweredOn":
                 LOG.debug(_("Powering off the VM"), instance=instance)
                 poweroff_task = self._session._call_method(
-                       self._session._get_vim(),
-                       "PowerOffVM_Task", vm_ref)
+                    self._session._get_vim(),
+                    "PowerOffVM_Task", vm_ref)
                 self._session._wait_for_task(instance['uuid'], poweroff_task)
                 LOG.debug(_("Powered off the VM"), instance=instance)
 
@@ -698,11 +753,11 @@ class VMwareVMOps(object):
             if destroy_disks:
                 try:
                     dir_ds_compliant_path = vm_util.build_datastore_path(
-                                     datastore_name,
-                                     os.path.dirname(vmx_file_path))
+                        datastore_name,
+                        os.path.dirname(vmx_file_path))
                     LOG.debug(_("Deleting contents of the VM from "
                                 "datastore %(datastore_name)s") %
-                               {'datastore_name': datastore_name},
+                              {'datastore_name': datastore_name},
                               instance=instance)
                     vim = self._session._get_vim()
                     delete_task = self._session._call_method(
@@ -714,13 +769,13 @@ class VMwareVMOps(object):
                     self._session._wait_for_task(instance['uuid'], delete_task)
                     LOG.debug(_("Deleted contents of the VM from "
                                 "datastore %(datastore_name)s") %
-                               {'datastore_name': datastore_name},
+                              {'datastore_name': datastore_name},
                               instance=instance)
                 except Exception as excep:
                     LOG.warn(_("In vmwareapi:vmops:destroy, "
-                                 "got this exception while deleting"
-                                 " the VM contents from the disk: %s")
-                                 % str(excep))
+                               "got this exception while deleting"
+                               " the VM contents from the disk: %s")
+                             % str(excep))
         except Exception as exc:
             LOG.exception(exc, instance=instance)
 
@@ -736,13 +791,13 @@ class VMwareVMOps(object):
         """Suspend the specified instance."""
         vm_ref = vm_util.get_vm_ref(self._session, instance)
         pwr_state = self._session._call_method(vim_util,
-                    "get_dynamic_property", vm_ref,
-                    "VirtualMachine", "runtime.powerState")
+                                               "get_dynamic_property", vm_ref,
+                                               "VirtualMachine", "runtime.powerState")
         # Only PoweredOn VMs can be suspended.
         if pwr_state == "poweredOn":
             LOG.debug(_("Suspending the VM"), instance=instance)
             suspend_task = self._session._call_method(self._session._get_vim(),
-                    "SuspendVM_Task", vm_ref)
+                                                      "SuspendVM_Task", vm_ref)
             self._session._wait_for_task(instance['uuid'], suspend_task)
             LOG.debug(_("Suspended the VM"), instance=instance)
         # Raise Exception if VM is poweredOff
@@ -751,19 +806,19 @@ class VMwareVMOps(object):
             raise exception.InstanceSuspendFailure(reason=reason)
         else:
             LOG.debug(_("VM was already in suspended state. So returning "
-                      "without doing anything"), instance=instance)
+                        "without doing anything"), instance=instance)
 
     def resume(self, instance):
         """Resume the specified instance."""
         vm_ref = vm_util.get_vm_ref(self._session, instance)
         pwr_state = self._session._call_method(vim_util,
-                                     "get_dynamic_property", vm_ref,
-                                     "VirtualMachine", "runtime.powerState")
+                                               "get_dynamic_property", vm_ref,
+                                               "VirtualMachine", "runtime.powerState")
         if pwr_state.lower() == "suspended":
             LOG.debug(_("Resuming the VM"), instance=instance)
             suspend_task = self._session._call_method(
-                                        self._session._get_vim(),
-                                       "PowerOnVM_Task", vm_ref)
+                self._session._get_vim(),
+                "PowerOnVM_Task", vm_ref)
             self._session._wait_for_task(instance['uuid'], suspend_task)
             LOG.debug(_("Resumed the VM"), instance=instance)
         else:
@@ -785,8 +840,8 @@ class VMwareVMOps(object):
 
         # Attach vmdk to the rescue VM
         hardware_devices = self._session._call_method(vim_util,
-                        "get_dynamic_property", vm_ref,
-                        "VirtualMachine", "config.hardware.device")
+                                                      "get_dynamic_property", vm_ref,
+                                                      "VirtualMachine", "config.hardware.device")
         vmdk_path, controller_key, adapter_type, disk_type, unit_number \
             = vm_util.get_vmdk_path_and_adapter_type(hardware_devices)
         # Figure out the correct unit number
@@ -795,12 +850,12 @@ class VMwareVMOps(object):
                                                      instance['uuid'])
         if rescue_vm_ref is None:
             rescue_vm_ref = vm_util.get_vm_ref_from_name(self._session,
-                                                     instance['name'])
+                                                         instance['name'])
         self._volumeops.attach_disk_to_vm(
-                                rescue_vm_ref, instance,
-                                adapter_type, disk_type, vmdk_path,
-                                controller_key=controller_key,
-                                unit_number=unit_number)
+            rescue_vm_ref, instance,
+            adapter_type, disk_type, vmdk_path,
+            controller_key=controller_key,
+            unit_number=unit_number)
 
     def unrescue(self, instance):
         """Unrescue the specified instance."""
@@ -815,14 +870,14 @@ class VMwareVMOps(object):
         vm_ref = vm_util.get_vm_ref(self._session, instance)
 
         pwr_state = self._session._call_method(vim_util,
-                    "get_dynamic_property", vm_ref,
-                    "VirtualMachine", "runtime.powerState")
+                                               "get_dynamic_property", vm_ref,
+                                               "VirtualMachine", "runtime.powerState")
         # Only PoweredOn VMs can be powered off.
         if pwr_state == "poweredOn":
             LOG.debug(_("Powering off the VM"), instance=instance)
             poweroff_task = self._session._call_method(
-                                        self._session._get_vim(),
-                                        "PowerOffVM_Task", vm_ref)
+                self._session._get_vim(),
+                "PowerOffVM_Task", vm_ref)
             self._session._wait_for_task(instance['uuid'], poweroff_task)
             LOG.debug(_("Powered off the VM"), instance=instance)
         # Raise Exception if VM is suspended
@@ -838,17 +893,17 @@ class VMwareVMOps(object):
         vm_ref = vm_util.get_vm_ref(self._session, instance)
 
         pwr_state = self._session._call_method(vim_util,
-                                     "get_dynamic_property", vm_ref,
-                                     "VirtualMachine", "runtime.powerState")
+                                               "get_dynamic_property", vm_ref,
+                                               "VirtualMachine", "runtime.powerState")
         if pwr_state == "poweredOn":
             LOG.debug(_("VM was already in powered on state. So returning "
-                      "without doing anything"), instance=instance)
+                        "without doing anything"), instance=instance)
         # Only PoweredOff and Suspended VMs can be powered on.
         else:
             LOG.debug(_("Powering on the VM"), instance=instance)
             poweron_task = self._session._call_method(
-                                        self._session._get_vim(),
-                                        "PowerOnVM_Task", vm_ref)
+                self._session._get_vim(),
+                "PowerOnVM_Task", vm_ref)
             self._session._wait_for_task(instance['uuid'], poweron_task)
             LOG.debug(_("Powered on the VM"), instance=instance)
 
@@ -904,8 +959,8 @@ class VMwareVMOps(object):
         LOG.debug(_("Renaming the VM to %s") % name_label,
                   instance=instance)
         rename_task = self._session._call_method(
-                            self._session._get_vim(),
-                            "Rename_Task", vm_ref, newName=name_label)
+            self._session._get_vim(),
+            "Rename_Task", vm_ref, newName=name_label)
         self._session._wait_for_task(instance['uuid'], rename_task)
         LOG.debug(_("Renamed the VM to %s") % name_label,
                   instance=instance)
@@ -915,7 +970,7 @@ class VMwareVMOps(object):
 
         # Get the clone vm spec
         ds_ref = vm_util.get_datastore_ref_and_name(
-                            self._session, None, dest)[0]
+            self._session, None, dest)[0]
         client_factory = self._session._get_vim().client.factory
         rel_spec = vm_util.relocate_vm_spec(client_factory, ds_ref, host_ref)
         clone_spec = vm_util.clone_vm_spec(client_factory, rel_spec)
@@ -924,11 +979,11 @@ class VMwareVMOps(object):
         # 3. Clone VM on ESX host
         LOG.debug(_("Cloning VM to host %s") % dest, instance=instance)
         vm_clone_task = self._session._call_method(
-                                self._session._get_vim(),
-                                "CloneVM_Task", vm_ref,
-                                folder=vm_folder_ref,
-                                name=instance['name'],
-                                spec=clone_spec)
+            self._session._get_vim(),
+            "CloneVM_Task", vm_ref,
+            folder=vm_folder_ref,
+            name=instance['name'],
+            spec=clone_spec)
         self._session._wait_for_task(instance['uuid'], vm_clone_task)
         LOG.debug(_("Cloned VM to host %s") % dest, instance=instance)
         self._update_instance_progress(context, instance,
@@ -949,13 +1004,13 @@ class VMwareVMOps(object):
         try:
             LOG.debug(_("Destroying the VM"), instance=instance)
             destroy_task = self._session._call_method(
-                                        self._session._get_vim(),
-                                        "Destroy_Task", vm_ref)
+                self._session._get_vim(),
+                "Destroy_Task", vm_ref)
             self._session._wait_for_task(instance['uuid'], destroy_task)
             LOG.debug(_("Destroyed the VM"), instance=instance)
         except Exception as excep:
             LOG.warn(_("In vmwareapi:vmops:confirm_migration, got this "
-                     "exception while destroying the VM: %s") % str(excep))
+                       "exception while destroying the VM: %s") % str(excep))
 
         if network_info:
             self.unplug_vifs(instance, network_info)
@@ -973,8 +1028,8 @@ class VMwareVMOps(object):
         LOG.debug(_("Renaming the VM from %s") % name_label,
                   instance=instance)
         rename_task = self._session._call_method(
-                            self._session._get_vim(),
-                            "Rename_Task", vm_ref, newName=instance['uuid'])
+            self._session._get_vim(),
+            "Rename_Task", vm_ref, newName=instance['uuid'])
         self._session._wait_for_task(instance['uuid'], rename_task)
         LOG.debug(_("Renamed the VM from %s") % name_label,
                   instance=instance)
@@ -1004,10 +1059,10 @@ class VMwareVMOps(object):
         LOG.debug(_("Migrating VM to host %s") % dest, instance=instance_ref)
         try:
             vm_migrate_task = self._session._call_method(
-                                    self._session._get_vim(),
-                                    "MigrateVM_Task", vm_ref,
-                                    host=host_ref,
-                                    priority="defaultPriority")
+                self._session._get_vim(),
+                "MigrateVM_Task", vm_ref,
+                host=host_ref,
+                priority="defaultPriority")
             self._session._wait_for_task(instance_ref['uuid'], vm_migrate_task)
         except Exception:
             with excutils.save_and_reraise_exception():
@@ -1020,11 +1075,11 @@ class VMwareVMOps(object):
         ctxt = nova_context.get_admin_context()
 
         instances_info = dict(instance_count=len(instances),
-                timeout=timeout)
+                              timeout=timeout)
 
         if instances_info["instance_count"] > 0:
             LOG.info(_("Found %(instance_count)d hung reboots "
-                    "older than %(timeout)d seconds") % instances_info)
+                       "older than %(timeout)d seconds") % instances_info)
 
         for instance in instances:
             LOG.info(_("Automatically hard rebooting"), instance=instance)
@@ -1035,11 +1090,11 @@ class VMwareVMOps(object):
         vm_ref = vm_util.get_vm_ref(self._session, instance)
 
         lst_properties = ["summary.config.numCpu",
-                    "summary.config.memorySizeMB",
-                    "runtime.powerState"]
+                          "summary.config.memorySizeMB",
+                          "runtime.powerState"]
         vm_props = self._session._call_method(vim_util,
-                    "get_object_properties", None, vm_ref, "VirtualMachine",
-                    lst_properties)
+                                              "get_object_properties", None, vm_ref, "VirtualMachine",
+                                              lst_properties)
         max_mem = None
         pwr_state = None
         num_cpu = None
@@ -1070,13 +1125,13 @@ class VMwareVMOps(object):
 
         param_list = {"id": str(vm_ref.value)}
         base_url = "%s://%s/screen?%s" % (self._session._scheme,
-                                         self._session._host_ip,
-                                         urllib.urlencode(param_list))
+                                          self._session._host_ip,
+                                          urllib.urlencode(param_list))
         request = urllib2.Request(base_url)
         base64string = base64.encodestring(
-                        '%s:%s' % (
-                        self._session._host_username,
-                        self._session._host_password)).replace('\n', '')
+            '%s:%s' % (
+                self._session._host_username,
+                self._session._host_password)).replace('\n', '')
         request.add_header("Authorization", "Basic %s" % base64string)
         result = urllib2.urlopen(request)
         if result.code == 200:
@@ -1102,13 +1157,13 @@ class VMwareVMOps(object):
 
         vnc_console = self.get_vnc_console(instance)
         host_name = vm_util.get_host_name_for_vm(
-                        self._session,
-                        instance)
+            self._session,
+            instance)
         vnc_console['host'] = host_name
 
         # NOTE: VM can move hosts in some situations. Debug for admins.
         LOG.debug(_("VM %(uuid)s is currently on host %(host_name)s"),
-                {'uuid': instance['name'], 'host_name': host_name})
+                  {'uuid': instance['name'], 'host_name': host_name})
 
         return vnc_console
 
@@ -1155,14 +1210,14 @@ class VMwareVMOps(object):
         vm_ref = vm_util.get_vm_ref(self._session, instance)
 
         machine_id_change_spec = vm_util.get_machine_id_change_spec(
-                                 client_factory,
-                                 self._get_machine_id_str(network_info))
+            client_factory,
+            self._get_machine_id_str(network_info))
 
         LOG.debug(_("Reconfiguring VM instance to set the machine id"),
                   instance=instance)
         reconfig_task = self._session._call_method(self._session._get_vim(),
-                           "ReconfigVM_Task", vm_ref,
-                           spec=machine_id_change_spec)
+                                                   "ReconfigVM_Task", vm_ref,
+                                                   spec=machine_id_change_spec)
         self._session._wait_for_task(instance['uuid'], reconfig_task)
         LOG.debug(_("Reconfigured VM instance to set the machine id"),
                   instance=instance)
@@ -1174,29 +1229,29 @@ class VMwareVMOps(object):
         vm_ref = vm_util.get_vm_ref(self._session, instance)
 
         vnc_config_spec = vm_util.get_vnc_config_spec(
-                                      client_factory, port, password)
+            client_factory, port, password)
 
         LOG.debug(_("Reconfiguring VM instance to enable vnc on "
-                  "port - %(port)s") % {'port': port},
+                    "port - %(port)s") % {'port': port},
                   instance=instance)
         reconfig_task = self._session._call_method(self._session._get_vim(),
-                           "ReconfigVM_Task", vm_ref,
-                           spec=vnc_config_spec)
+                                                   "ReconfigVM_Task", vm_ref,
+                                                   spec=vnc_config_spec)
         self._session._wait_for_task(instance['uuid'], reconfig_task)
         LOG.debug(_("Reconfigured VM instance to enable vnc on "
-                  "port - %(port)s") % {'port': port},
+                    "port - %(port)s") % {'port': port},
                   instance=instance)
 
     def _get_datacenter_ref_and_name(self):
         """Get the datacenter name and the reference."""
         dc_obj = self._session._call_method(vim_util, "get_objects",
-                "Datacenter", ["name"])
+                                            "Datacenter", ["name"])
         return dc_obj[0].obj, dc_obj[0].propSet[0].val
 
     def _get_host_ref_from_name(self, host_name):
         """Get reference to the host with the name specified."""
         host_objs = self._session._call_method(vim_util, "get_objects",
-                    "HostSystem", ["name"])
+                                               "HostSystem", ["name"])
         for host in host_objs:
             if host.propSet[0].val == host_name:
                 return host.obj
@@ -1227,15 +1282,15 @@ class VMwareVMOps(object):
     def _path_exists(self, ds_browser, ds_path):
         """Check if the path exists on the datastore."""
         search_task = self._session._call_method(self._session._get_vim(),
-                                   "SearchDatastore_Task",
-                                   ds_browser,
-                                   datastorePath=ds_path)
+                                                 "SearchDatastore_Task",
+                                                 ds_browser,
+                                                 datastorePath=ds_path)
         # Wait till the state changes from queued or running.
         # If an error state is returned, it means that the path doesn't exist.
         while True:
             task_info = self._session._call_method(vim_util,
-                                       "get_dynamic_property",
-                                       search_task, "Task", "info")
+                                                   "get_dynamic_property",
+                                                   search_task, "Task", "info")
             if task_info.state in ['queued', 'running']:
                 time.sleep(2)
                 continue
@@ -1249,16 +1304,16 @@ class VMwareVMOps(object):
         client_factory = self._session._get_vim().client.factory
         search_spec = vm_util.search_datastore_spec(client_factory, file_name)
         search_task = self._session._call_method(self._session._get_vim(),
-                                   "SearchDatastore_Task",
-                                   ds_browser,
-                                   datastorePath=ds_path,
-                                   searchSpec=search_spec)
+                                                 "SearchDatastore_Task",
+                                                 ds_browser,
+                                                 datastorePath=ds_path,
+                                                 searchSpec=search_spec)
         # Wait till the state changes from queued or running.
         # If an error state is returned, it means that the path doesn't exist.
         while True:
             task_info = self._session._call_method(vim_util,
-                                       "get_dynamic_property",
-                                       search_task, "Task", "info")
+                                                   "get_dynamic_property",
+                                                   search_task, "Task", "info")
             if task_info.state in ['queued', 'running']:
                 time.sleep(2)
                 continue
@@ -1279,18 +1334,18 @@ class VMwareVMOps(object):
         LOG.debug(_("Creating directory with path %s") % ds_path)
         dc_ref = self._get_datacenter_ref_and_name()[0]
         self._session._call_method(self._session._get_vim(), "MakeDirectory",
-                    self._session._get_vim().get_service_content().fileManager,
-                    name=ds_path, datacenter=dc_ref,
-                    createParentDirectories=False)
+                                   self._session._get_vim().get_service_content().fileManager,
+                                   name=ds_path, datacenter=dc_ref,
+                                   createParentDirectories=False)
         LOG.debug(_("Created directory with path %s") % ds_path)
 
     def _check_if_folder_file_exists(self, ds_ref, ds_name,
                                      folder_name, file_name):
         ds_browser = vim_util.get_dynamic_property(
-                                self._session._get_vim(),
-                                ds_ref,
-                                "Datastore",
-                                "browser")
+            self._session._get_vim(),
+            ds_ref,
+            "Datastore",
+            "browser")
         # Check if the folder exists or not. If not, create one
         # Check if the file exists or not.
         folder_path = vm_util.build_datastore_path(ds_name, folder_name)
