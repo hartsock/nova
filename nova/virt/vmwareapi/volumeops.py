@@ -41,6 +41,25 @@ class VMwareVolumeOps(object):
         self._session = session
         self._cluster = cluster
 
+    def attach_cdrom_to_vm(self, vm_ref, instance_name,
+                         datastore, file_path):
+        """Attach cdrom to VM by reconfiguration."""
+        client_factory = self._session._get_vim().client.factory
+        vmdk_attach_config_spec = vm_util.get_cdrom_attach_config_spec(
+                                    client_factory, datastore, file_path)
+
+        LOG.debug(_("Reconfiguring VM instance %(instance_name)s to attach "
+                    "cdrom %(file_path)s"),
+                  {'instance_name': instance_name, 'file_path': file_path})
+        reconfig_task = self._session._call_method(
+                                        self._session._get_vim(),
+                                        "ReconfigVM_Task", vm_ref,
+                                        spec=vmdk_attach_config_spec)
+        self._session._wait_for_task(instance_name, reconfig_task)
+        LOG.debug(_("Reconfigured VM instance %(instance_name)s to attach "
+                    "cdrom %(file_path)s"),
+                  {'instance_name': instance_name, 'file_path': file_path})
+
     def attach_disk_to_vm(self, vm_ref, instance_name,
                           adapter_type, disk_type, vmdk_path=None,
                           disk_size=None, linked_clone=False,
