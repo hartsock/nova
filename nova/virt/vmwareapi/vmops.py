@@ -41,6 +41,7 @@ from nova.openstack.common.gettextutils import _
 from nova.openstack.common import log as logging
 from nova.utils import get_boolean
 from nova.virt import driver
+from nova.virt.vmwareapi import disk_util
 from nova.virt.vmwareapi import vif as vmwarevif
 from nova.virt.vmwareapi import vim_util
 from nova.virt.vmwareapi import vm_util
@@ -367,62 +368,124 @@ class VMwareVMOps(object):
                 self._default_root_device, block_device_info)
 
         if not ebs_root:
-            if linked_clone:
-                upload_folder = self._instance_path_base
-                upload_name = instance['image_ref']
-            else:
-                upload_folder = instance['uuid']
-                upload_name = instance['name']
+            # the value of linked_clone is calculated above
+            upload_folder = self._instance_path_base
+            upload_name = instance['image_ref']
+            # the max length of directory is 31.
+            instance_dir = instance['uuid'][:-5]
+            root_size = instance['root_gb'] * 1024 * 1024
 
             # The vmdk meta-data file
             uploaded_vmdk_name = "%s/%s.vmdk" % (upload_folder, upload_name)
             uploaded_vmdk_path = vm_util.build_datastore_path(data_store_name,
                                                 uploaded_vmdk_name)
 
-            if not (linked_clone and self._check_if_folder_file_exists(
-                                        data_store_ref, data_store_name,
-                                        upload_folder, upload_name + ".vmdk")):
+            dc_ref, dc_name = self._get_datacenter_ref_and_name()
 
-                # Naming the VM files in correspondence with the VM instance
-                # The flat vmdk file name
-                flat_uploaded_vmdk_name = "%s/%s-flat.vmdk" % (
-                                            upload_folder, upload_name)
-                # The sparse vmdk file name for sparse disk image
-                sparse_uploaded_vmdk_name = "%s/%s-sparse.vmdk" % (
-                                            upload_folder, upload_name)
+            # Naming the VM files in correspondence with the VM instance
+            # The flat vmdk file name
+            flat_uploaded_vmdk_name = "%s/%s-flat.vmdk" % (
+                                        upload_folder, upload_name)
+            # The sparse vmdk file name for sparse disk image
+            sparse_uploaded_vmdk_name = "%s/%s-sparse.vmdk" % (
+                                        upload_folder, upload_name)
 
-                flat_uploaded_vmdk_path = vm_util.build_datastore_path(
-                                                    data_store_name,
-                                                    flat_uploaded_vmdk_name)
-                sparse_uploaded_vmdk_path = vm_util.build_datastore_path(
-                                                    data_store_name,
-                                                    sparse_uploaded_vmdk_name)
-                dc_ref = self._get_datacenter_ref_and_name()[0]
+            flat_uploaded_vmdk_path = vm_util.build_datastore_path(
+                                                data_store_name,
+                                                flat_uploaded_vmdk_name)
+            sparse_uploaded_vmdk_path = vm_util.build_datastore_path(
+                                                data_store_name,
+                                                sparse_uploaded_vmdk_name)
 
+            cookies = \
+                self._session._get_vim().client.options.transport.cookiejar
+
+            if not (
+                self._check_if_folder_file_exists(data_store_ref,
+                data_store_name, upload_folder, upload_name + ".vmdk")
+                    ):
                 if disk_type != "sparse":
-                   # Create a flat virtual disk and retain the metadata file.
+                    # Create a flat virtual disk and retain the metadata file.
                     _create_virtual_disk()
                     _delete_disk_file(flat_uploaded_vmdk_path)
 
-                cookies = \
-                    self._session._get_vim().client.options.transport.cookiejar
                 _fetch_image_on_esx_datastore()
 
-                if disk_type == "sparse":
-                    # Copy the sparse virtual disk to a thin virtual disk.
-                    disk_type = "thin"
-                    _copy_virtual_disk()
-                    _delete_disk_file(sparse_uploaded_vmdk_path)
-            else:
-                # linked clone base disk exists
-                if disk_type == "sparse":
-                    disk_type = "thin"
+            if not linked_clone:
+                instance_vmdk_name = "%s/%s.vmdk" % (instance_dir, upload_name)
+                instance_vmdk_path = vm_util.build_datastore_path(
+                                data_store_name, instance_vmdk_name)
 
-            # Attach the vmdk uploaded to the VM.
+                disk_copy_spec = vm_util.get_vmdk_create_spec(client_factory,
+                                    root_size, adapter_type, disk_type)
+                disk_util.copy_disk(self._session, uploaded_vmdk_path, dc_ref,
+                                instance_vmdk_path, instance, disk_copy_spec)
+                disk_util.extend_disk(self._session, instance_vmdk_path,
+                                            instance, dc_ref, root_size)
+
+            else:
+                if disk_type == "sparse":
+                    disk_type = "thin"
+                # Cache disk image for each flavor, add disk size as suffix
+                # of disk image file name to identify cached images.
+                upload_name = upload_name + "_%d.vmdk" % instance['root_gb']
+
+                if not (
+                    self._check_if_folder_file_exists(data_store_ref,
+                    data_store_name, upload_folder, upload_name)
+                        ):
+                    cached_disk_name = "%s/%s" % (upload_folder, upload_name)
+                    cached_disk_path = vm_util.build_datastore_path(
+                                data_store_name, cached_disk_name)
+
+                    disk_copy_spec = vm_util.get_vmdk_create_spec(
+                        client_factory, root_size, adapter_type, disk_type)
+                    print "=" * 80
+                    print "=" * 80
+                    print "=" * 80
+                    print "=" * 80
+                    print (uploaded_vmdk_path,
+                        dc_ref, cached_disk_path, instance, disk_copy_spec)
+                    print "=" * 80
+                    print "=" * 80
+                    print "=" * 80
+                    print "=" * 80
+                    disk_util.copy_disk(self._session, uploaded_vmdk_path,
+                        dc_ref, cached_disk_path, instance, disk_copy_spec)
+
+                    disk_util.extend_disk(self._session, cached_disk_path,
+                                            instance, dc_ref, root_size)
+
+                instance_vmdk_name = "%s/%s" % (upload_folder, upload_name)
+                instance_vmdk_path = vm_util.build_datastore_path(
+                                data_store_name, uploaded_vmdk_name)
+
+            # Create ephemeral disk for instance.
+            if instance['ephemeral_gb']:
+                ephemeral_size = instance['ephemeral_gb'] * 1024 * 1024
+                disk_path = instance_dir + '/' + 'ephemeral_disk.vmdk'
+                disk_create_path = vm_util.build_datastore_path(
+                                            data_store_name, disk_path)
+
+                disk_create_spec = vm_util.get_vmdk_create_spec(
+                client_factory, ephemeral_size, adapter_type, disk_type)
+
+                disk_util.create_virtual_disk(self._session, dc_ref,
+                    disk_create_spec, instance, disk_create_path)
+
+            # Attach root disk to the VM.
             self._volumeops.attach_disk_to_vm(
                                 vm_ref, instance,
-                                adapter_type, disk_type, uploaded_vmdk_path,
-                                vmdk_file_size_in_kb, linked_clone)
+                                adapter_type, disk_type, instance_vmdk_path,
+                                root_size, linked_clone)
+
+            if instance['ephemeral_gb']:
+                # Attach ephemeral disk to the VM.
+                self._volumeops.attach_disk_to_vm(
+                                vm_ref, instance,
+                                adapter_type, disk_type, disk_create_path,
+                                ephemeral_size, linked_clone)
+
         else:
             # Attach the root disk to the VM.
             root_disk = driver.block_device_info_get_mapping(

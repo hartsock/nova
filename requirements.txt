@@ -1,35 +1,34 @@
-d2to1>=0.2.10,<0.3
 pbr>=0.5.16,<0.6
-SQLAlchemy>=0.7.8,<0.7.99
+SQLAlchemy>=0.7.8,<=0.7.99
 Cheetah>=2.4.4
 amqplib>=0.6.1
-anyjson>=0.2.4
+anyjson>=0.3.3
 argparse
-boto
-eventlet>=0.9.17
-kombu>=1.0.4
+boto>=2.4.0
+eventlet>=0.12.0
+kombu>=2.4.8
 lxml>=2.3
-routes>=1.12.3
-WebOb==1.2.3
-greenlet>=0.3.1
+Routes>=1.12.3
+WebOb>=1.2.3,<1.3
+greenlet>=0.3.2
 PasteDeploy>=1.5.0
-paste
+Paste
 sqlalchemy-migrate>=0.7.2
-netaddr>=0.7.6
+netaddr
 suds>=0.4
-paramiko
+paramiko>=1.8.0
 pyasn1
 Babel>=0.9.6
 iso8601>=0.1.4
-requests>=1.1,<1.2.1 # order-dependent python-cinderclient req cap, bug 1182271
-python-cinderclient>=1.0.1
-python-neutronclient>=2.2.3,<3.0.0
+requests>=1.1
+python-cinderclient>=1.0.4
+python-neutronclient>=2.2.3,<3
 python-glanceclient>=0.9.0
-python-keystoneclient>=0.2.0
+python-keystoneclient>=0.3.0
 six
 stevedore>=0.10
-websockify<0.4
-pyparsing>=1.5.7,<2.0 # order-dependent python-quantumclient req, bug 1191866
+websockify>=0.5.1,<0.6
+pyparsing>=1.5.7,<2.0
 
 -f http://tarballs.openstack.org/oslo.config/oslo.config-1.2.0a3.tar.gz#egg=oslo.config-1.2.0a3
-oslo.config>=1.2.0a3
+oslo.config>=1.1.0

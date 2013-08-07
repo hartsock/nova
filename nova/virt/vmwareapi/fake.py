@@ -720,6 +720,11 @@ class FakeVim(object):
         task_mdo = create_task(method, "success")
         return task_mdo.obj
 
+    def _extend_disk(self, method, size):
+        """Extend disk size when create a instance."""
+        task_mdo = create_task(method, "success")
+        return task_mdo.obj
+
     def _snapshot_vm(self, method):
         """Snapshots a VM. Here we do nothing for faking sake."""
         task_mdo = create_task(method, "success")
@@ -879,6 +884,9 @@ class FakeVim(object):
         elif attr_name == "CopyVirtualDisk_Task":
             return lambda *args, **kwargs: self._create_copy_disk(attr_name,
                                                 kwargs.get("destName"))
+        elif attr_name == "ExtendVirtualDisk_Task":
+            return lambda *args, **kwargs: self._extend_disk(attr_name,
+                                                kwargs.get("size"))
         elif attr_name == "DeleteVirtualDisk_Task":
             return lambda *args, **kwargs: self._delete_disk(attr_name,
                                                 *args, **kwargs)

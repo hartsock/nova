@@ -148,6 +148,8 @@ class VMwareAPIVMTestCase(test.TestCase):
                   'mac_address': "de:ad:be:ef:be:ef",
                   'instance_type': 'm1.large',
                   'node': self.node_name,
+                  'root_gb': 10,
+                  'ephemeral_gb': 200,
                   }
         self.instance = db.instance_create(None, values)
 
