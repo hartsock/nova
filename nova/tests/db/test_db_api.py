@@ -21,6 +21,7 @@
 
 import copy
 import datetime
+import iso8601
 import types
 import uuid as stdlib_uuid
 
@@ -349,6 +350,20 @@ class AggregateDBApiTestCase(test.TestCase):
         r1 = db.aggregate_metadata_get_by_host(ctxt, 'foo.openstack.org')
         self.assertEqual(r1['fake_key1'], set(['fake_value1']))
         self.assertFalse('badkey' in r1)
+
+    def test_aggregate_metadata_get_by_metadata_key(self):
+        ctxt = context.get_admin_context()
+        values = {'aggregate_id': 'fake_id',
+                  'name': 'fake_aggregate'}
+        aggr = _create_aggregate_with_hosts(context=ctxt, values=values,
+                                            hosts=['bar.openstack.org'],
+                                            metadata={'availability_zone':
+                                                      'az1'})
+        r1 = db.aggregate_metadata_get_by_metadata_key(ctxt, aggr['id'],
+                                                        'availability_zone')
+        self.assertEqual(r1['availability_zone'], set(['az1']))
+        self.assertTrue('availability_zone' in r1)
+        self.assertFalse('name' in r1)
 
     def test_aggregate_metadata_get_by_host_with_key(self):
         ctxt = context.get_admin_context()
@@ -1258,6 +1273,41 @@ class InstanceTestCase(test.TestCase, ModelsObjectComparatorMixin):
         instance = self.create_instance_with_args()
         self.assertTrue(uuidutils.is_uuid_like(instance['uuid']))
 
+    def test_instance_create_with_object_values(self):
+        values = {
+            'access_ip_v4': netaddr.IPAddress('1.2.3.4'),
+            'access_ip_v6': netaddr.IPAddress('::1'),
+            }
+        dt_keys = ('created_at', 'deleted_at', 'updated_at',
+                   'launched_at', 'terminated_at', 'scheduled_at')
+        dt = timeutils.utcnow()
+        dt_utc = dt.replace(tzinfo=iso8601.iso8601.Utc())
+        for key in dt_keys:
+            values[key] = dt_utc
+        inst = db.instance_create(self.ctxt, values)
+        self.assertEqual(inst['access_ip_v4'], '1.2.3.4')
+        self.assertEqual(inst['access_ip_v6'], '::1')
+        for key in dt_keys:
+            self.assertEqual(inst[key], dt)
+
+    def test_instance_update_with_object_values(self):
+        values = {
+            'access_ip_v4': netaddr.IPAddress('1.2.3.4'),
+            'access_ip_v6': netaddr.IPAddress('::1'),
+            }
+        dt_keys = ('created_at', 'deleted_at', 'updated_at',
+                   'launched_at', 'terminated_at', 'scheduled_at')
+        dt = timeutils.utcnow()
+        dt_utc = dt.replace(tzinfo=iso8601.iso8601.Utc())
+        for key in dt_keys:
+            values[key] = dt_utc
+        inst = db.instance_create(self.ctxt, {})
+        inst = db.instance_update(self.ctxt, inst['uuid'], values)
+        self.assertEqual(inst['access_ip_v4'], '1.2.3.4')
+        self.assertEqual(inst['access_ip_v6'], '::1')
+        for key in dt_keys:
+            self.assertEqual(inst[key], dt)
+
     def test_instance_get_all_with_meta(self):
         inst = self.create_instance_with_args()
         for inst in db.instance_get_all(self.ctxt):
@@ -1521,6 +1571,21 @@ class InstanceTestCase(test.TestCase, ModelsObjectComparatorMixin):
                                                  'soft_deleted': True})
         self._assertEqualListsOfInstances([inst2, inst3], result)
 
+    def test_instance_get_all_by_filters_cleaned(self):
+        inst1 = self.create_instance_with_args()
+        inst2 = self.create_instance_with_args(reservation_id='b')
+        db.instance_update(self.ctxt, inst1['uuid'], {'cleaned': 1})
+        result = db.instance_get_all_by_filters(self.ctxt, {})
+        self.assertEqual(2, len(result))
+        self.assertIn(inst1['uuid'], [result[0]['uuid'], result[1]['uuid']])
+        self.assertIn(inst2['uuid'], [result[0]['uuid'], result[1]['uuid']])
+        if inst1['uuid'] == result[0]['uuid']:
+            self.assertTrue(result[0]['cleaned'])
+            self.assertFalse(result[1]['cleaned'])
+        else:
+            self.assertTrue(result[1]['cleaned'])
+            self.assertFalse(result[0]['cleaned'])
+
     def test_instance_get_all_by_host_and_node_no_join(self):
         instance = self.create_instance_with_args()
         result = db.instance_get_all_by_host_and_node(self.ctxt, 'h1', 'n1')
@@ -1535,7 +1600,7 @@ class InstanceTestCase(test.TestCase, ModelsObjectComparatorMixin):
         # Ensure one rebooting instance with updated_at older than 10 seconds
         # is returned.
         instance = self.create_instance_with_args(task_state="rebooting",
-                updated_at=datetime.datetime(2000, 01, 01, 12, 00, 00))
+                updated_at=datetime.datetime(2000, 1, 1, 12, 0, 0))
         results = db.instance_get_all_hung_in_rebooting(self.ctxt, 10)
         self._assertEqualListsOfObjects([instance], results,
             ignored_keys=['task_state', 'info_cache', 'security_groups',
@@ -2766,8 +2831,8 @@ class FixedIPTestCase(BaseInstanceTypeTestCase):
         self.assertEqual(result, 0)
 
     def test_fixed_ip_get_by_floating_address(self):
-        fixed_ip = db.fixed_ip_create(self.ctxt, {'address': 'fixed'})
-        values = {'address': 'floating',
+        fixed_ip = db.fixed_ip_create(self.ctxt, {'address': '192.168.0.2'})
+        values = {'address': '8.7.6.5',
                   'fixed_ip_id': fixed_ip['id']}
         floating = db.floating_ip_create(self.ctxt, values)['address']
         fixed_ip_ref = db.fixed_ip_get_by_floating_address(self.ctxt, floating)
@@ -2812,7 +2877,7 @@ class FixedIPTestCase(BaseInstanceTypeTestCase):
     def test_fixed_ip_get_by_instance_fixed_ip_found(self):
         instance_uuid = self._create_instance()
 
-        FIXED_IP_ADDRESS = 'address'
+        FIXED_IP_ADDRESS = '192.168.1.5'
         db.fixed_ip_create(self.ctxt, dict(
             instance_uuid=instance_uuid, address=FIXED_IP_ADDRESS))
 
@@ -2823,10 +2888,10 @@ class FixedIPTestCase(BaseInstanceTypeTestCase):
     def test_fixed_ip_get_by_instance_multiple_fixed_ips_found(self):
         instance_uuid = self._create_instance()
 
-        FIXED_IP_ADDRESS_1 = 'address_1'
+        FIXED_IP_ADDRESS_1 = '192.168.1.5'
         db.fixed_ip_create(self.ctxt, dict(
             instance_uuid=instance_uuid, address=FIXED_IP_ADDRESS_1))
-        FIXED_IP_ADDRESS_2 = 'address_2'
+        FIXED_IP_ADDRESS_2 = '192.168.1.6'
         db.fixed_ip_create(self.ctxt, dict(
             instance_uuid=instance_uuid, address=FIXED_IP_ADDRESS_2))
 
@@ -2838,16 +2903,16 @@ class FixedIPTestCase(BaseInstanceTypeTestCase):
     def test_fixed_ip_get_by_instance_inappropriate_ignored(self):
         instance_uuid = self._create_instance()
 
-        FIXED_IP_ADDRESS_1 = 'address_1'
+        FIXED_IP_ADDRESS_1 = '192.168.1.5'
         db.fixed_ip_create(self.ctxt, dict(
             instance_uuid=instance_uuid, address=FIXED_IP_ADDRESS_1))
-        FIXED_IP_ADDRESS_2 = 'address_2'
+        FIXED_IP_ADDRESS_2 = '192.168.1.6'
         db.fixed_ip_create(self.ctxt, dict(
             instance_uuid=instance_uuid, address=FIXED_IP_ADDRESS_2))
 
         another_instance = db.instance_create(self.ctxt, {})
         db.fixed_ip_create(self.ctxt, dict(
-            instance_uuid=another_instance['uuid'], address="another_addr"))
+            instance_uuid=another_instance['uuid'], address="192.168.1.7"))
 
         ips_list = db.fixed_ip_get_by_instance(self.ctxt, instance_uuid)
         self._assertEqualListsOfPrimitivesAsSets(
@@ -2867,7 +2932,7 @@ class FixedIPTestCase(BaseInstanceTypeTestCase):
         vif = db.virtual_interface_create(
             self.ctxt, dict(instance_uuid=instance_uuid))
 
-        FIXED_IP_ADDRESS = 'address'
+        FIXED_IP_ADDRESS = '192.168.1.5'
         db.fixed_ip_create(self.ctxt, dict(
             virtual_interface_id=vif.id, address=FIXED_IP_ADDRESS))
 
@@ -2881,10 +2946,10 @@ class FixedIPTestCase(BaseInstanceTypeTestCase):
         vif = db.virtual_interface_create(
             self.ctxt, dict(instance_uuid=instance_uuid))
 
-        FIXED_IP_ADDRESS_1 = 'address_1'
+        FIXED_IP_ADDRESS_1 = '192.168.1.5'
         db.fixed_ip_create(self.ctxt, dict(
             virtual_interface_id=vif.id, address=FIXED_IP_ADDRESS_1))
-        FIXED_IP_ADDRESS_2 = 'address_2'
+        FIXED_IP_ADDRESS_2 = '192.168.1.6'
         db.fixed_ip_create(self.ctxt, dict(
             virtual_interface_id=vif.id, address=FIXED_IP_ADDRESS_2))
 
@@ -2899,17 +2964,17 @@ class FixedIPTestCase(BaseInstanceTypeTestCase):
         vif = db.virtual_interface_create(
             self.ctxt, dict(instance_uuid=instance_uuid))
 
-        FIXED_IP_ADDRESS_1 = 'address_1'
+        FIXED_IP_ADDRESS_1 = '192.168.1.5'
         db.fixed_ip_create(self.ctxt, dict(
             virtual_interface_id=vif.id, address=FIXED_IP_ADDRESS_1))
-        FIXED_IP_ADDRESS_2 = 'address_2'
+        FIXED_IP_ADDRESS_2 = '192.168.1.6'
         db.fixed_ip_create(self.ctxt, dict(
             virtual_interface_id=vif.id, address=FIXED_IP_ADDRESS_2))
 
         another_vif = db.virtual_interface_create(
             self.ctxt, dict(instance_uuid=instance_uuid))
         db.fixed_ip_create(self.ctxt, dict(
-            virtual_interface_id=another_vif.id, address="another_addr"))
+            virtual_interface_id=another_vif.id, address="192.168.1.7"))
 
         ips_list = db.fixed_ips_by_virtual_interface(self.ctxt, vif.id)
         self._assertEqualListsOfPrimitivesAsSets(
@@ -2985,7 +3050,7 @@ class FixedIPTestCase(BaseInstanceTypeTestCase):
         self.assertEqual(fixed_ip['instance_uuid'], instance_uuid)
 
     def test_fixed_ip_create_same_address(self):
-        address = 'fixed_ip_address'
+        address = '192.168.1.5'
         params = {'address': address}
         db.fixed_ip_create(self.ctxt, params)
         self.assertRaises(exception.FixedIpExists, db.fixed_ip_create,
@@ -2999,7 +3064,7 @@ class FixedIPTestCase(BaseInstanceTypeTestCase):
             'deleted': 0,
             'leased': False,
             'host': '127.0.0.1',
-            'address': 'localhost',
+            'address': '192.168.1.5',
             'allocated': False,
             'instance_uuid': instance_uuid,
             'network_id': network_id,
@@ -3011,8 +3076,8 @@ class FixedIPTestCase(BaseInstanceTypeTestCase):
         self._assertEqualObjects(param, fixed_ip_data, ignored_keys)
 
     def test_fixed_ip_bulk_create_same_address(self):
-        address_1 = 'fixed_ip_address'
-        address_2 = 'fixed_ip_duplicate_address'
+        address_1 = '192.168.1.5'
+        address_2 = '192.168.1.6'
         instance_uuid = self._create_instance()
         network_id_1 = db.network_create_safe(self.ctxt, {})['id']
         network_id_2 = db.network_create_safe(self.ctxt, {})['id']
@@ -3041,8 +3106,9 @@ class FixedIPTestCase(BaseInstanceTypeTestCase):
                           db.fixed_ip_get_by_address, self.ctxt, address_2)
 
     def test_fixed_ip_bulk_create_success(self):
-        address_1 = 'fixed_ip_address_1'
-        address_2 = 'fixed_ip_address_2'
+        address_1 = '192.168.1.5'
+        address_2 = '192.168.1.6'
+
         instance_uuid = self._create_instance()
         network_id_1 = db.network_create_safe(self.ctxt, {})['id']
         network_id_2 = db.network_create_safe(self.ctxt, {})['id']
@@ -3070,7 +3136,7 @@ class FixedIPTestCase(BaseInstanceTypeTestCase):
             self._assertEqualObjects(param, ip, ignored_keys)
 
     def test_fixed_ip_disassociate(self):
-        address = 'fixed_ip_address'
+        address = '192.168.1.5'
         instance_uuid = self._create_instance()
         network_id = db.network_create_safe(self.ctxt, {})['id']
         param = {
@@ -3098,7 +3164,7 @@ class FixedIPTestCase(BaseInstanceTypeTestCase):
                           db.fixed_ip_get, self.ctxt, 0)
 
     def test_fixed_ip_get_success2(self):
-        address = 'fixed_ip_address'
+        address = '192.168.1.5'
         instance_uuid = self._create_instance()
         network_id = db.network_create_safe(self.ctxt, {})['id']
         param = {
@@ -3119,7 +3185,7 @@ class FixedIPTestCase(BaseInstanceTypeTestCase):
                           self.ctxt, fixed_ip_id)
 
     def test_fixed_ip_get_success(self):
-        address = 'fixed_ip_address'
+        address = '192.168.1.5'
         instance_uuid = self._create_instance()
         network_id = db.network_create_safe(self.ctxt, {})['id']
         param = {
@@ -3142,15 +3208,17 @@ class FixedIPTestCase(BaseInstanceTypeTestCase):
 
     def test_fixed_ip_get_by_address_detailed_not_found_exception(self):
         self.assertRaises(exception.FixedIpNotFoundForAddress,
-                          db.fixed_ip_get_by_address_detailed, self.ctxt, 'x')
+                          db.fixed_ip_get_by_address_detailed, self.ctxt,
+                          '192.168.1.5')
 
     def test_fixed_ip_get_by_address_with_data_error_exception(self):
         self.mock_db_query_first_to_raise_data_error_exception()
         self.assertRaises(exception.FixedIpInvalid,
-                          db.fixed_ip_get_by_address_detailed, self.ctxt, 'x')
+                          db.fixed_ip_get_by_address_detailed, self.ctxt,
+                          '192.168.1.6')
 
     def test_fixed_ip_get_by_address_detailed_sucsess(self):
-        address = 'fixed_ip_address'
+        address = '192.168.1.5'
         instance_uuid = self._create_instance()
         network_id = db.network_create_safe(self.ctxt, {})['id']
         param = {
@@ -3184,7 +3252,7 @@ class FixedIPTestCase(BaseInstanceTypeTestCase):
     def test_fixed_ip_update_not_found_for_address(self):
         self.assertRaises(exception.FixedIpNotFoundForAddress,
                           db.fixed_ip_update, self.ctxt,
-                          'fixed_ip_address', {})
+                          '192.168.1.5', {})
 
     def test_fixed_ip_update(self):
         instance_uuid_1 = self._create_instance()
@@ -3193,14 +3261,14 @@ class FixedIPTestCase(BaseInstanceTypeTestCase):
         network_id_2 = db.network_create_safe(self.ctxt, {})['id']
         param_1 = {
             'reserved': True, 'deleted': 0, 'leased': True,
-            'host': '192.168.133.1', 'address': 'localhost',
+            'host': '192.168.133.1', 'address': '10.0.0.2',
             'allocated': True, 'instance_uuid': instance_uuid_1,
             'network_id': network_id_1, 'virtual_interface_id': '123',
         }
 
         param_2 = {
             'reserved': False, 'deleted': 0, 'leased': False,
-            'host': '127.0.0.1', 'address': 'localhost', 'allocated': False,
+            'host': '127.0.0.1', 'address': '10.0.0.3', 'allocated': False,
             'instance_uuid': instance_uuid_2, 'network_id': network_id_2,
             'virtual_interface_id': None
         }
@@ -3398,7 +3466,7 @@ class FloatingIpTestCase(test.TestCase, ModelsObjectComparatorMixin):
     def test_floating_ip_fixed_ip_associate_float_ip_not_found(self):
         self.assertRaises(exception.FloatingIpNotFoundForAddress,
                           db.floating_ip_fixed_ip_associate,
-                          self.ctxt, 'non exist', 'some', 'some')
+                          self.ctxt, '10.10.10.10', 'some', 'some')
 
     def test_floating_ip_deallocate(self):
         values = {'address': '1.1.1.1', 'project_id': 'fake', 'host': 'fake'}
@@ -3451,7 +3519,8 @@ class FloatingIpTestCase(test.TestCase, ModelsObjectComparatorMixin):
 
     def test_floating_ip_disassociate_not_found(self):
         self.assertRaises(exception.FloatingIpNotFoundForAddress,
-                          db.floating_ip_disassociate, self.ctxt, 'non exist')
+                          db.floating_ip_disassociate, self.ctxt,
+                          '11.11.11.11')
 
     def test_floating_ip_set_auto_assigned(self):
         addresses = ['1.1.1.1', '1.1.1.2', '1.1.1.3']
@@ -3545,7 +3614,7 @@ class FloatingIpTestCase(test.TestCase, ModelsObjectComparatorMixin):
     def test_floating_ip_get_by_address_not_found(self):
         self.assertRaises(exception.FloatingIpNotFoundForAddress,
                           db.floating_ip_get_by_address,
-                          self.ctxt, 'non_exists_host')
+                          self.ctxt, '20.20.20.20')
 
     def test_floating_ip_get_by_invalid_address(self):
         self.mock_db_query_first_to_raise_data_error_exception()
@@ -4381,10 +4450,10 @@ class NetworkTestCase(test.TestCase, ModelsObjectComparatorMixin):
         values = {'host': 'localhost', 'project_id': 'project1'}
         network = db.network_create_safe(self.ctxt, values)
         db_network = db.network_get(self.ctxt, network['id'])
-        values = {'network_id': network['id'], 'address': 'fake1'}
+        values = {'network_id': network['id'], 'address': '192.168.1.5'}
         address1 = db.fixed_ip_create(self.ctxt, values)['address']
         values = {'network_id': network['id'],
-                  'address': 'fake2',
+                  'address': '192.168.1.6',
                   'allocated': True}
         address2 = db.fixed_ip_create(self.ctxt, values)['address']
         self.assertRaises(exception.NetworkInUse,
@@ -4400,9 +4469,9 @@ class NetworkTestCase(test.TestCase, ModelsObjectComparatorMixin):
     def test_network_in_use_on_host(self):
         values = {'host': 'foo', 'hostname': 'myname'}
         instance = db.instance_create(self.ctxt, values)
-        values = {'address': 'bar', 'instance_uuid': instance['uuid']}
+        values = {'address': '192.168.1.5', 'instance_uuid': instance['uuid']}
         vif = db.virtual_interface_create(self.ctxt, values)
-        values = {'address': 'baz',
+        values = {'address': '192.168.1.6',
                   'network_id': 1,
                   'allocated': True,
                   'instance_uuid': instance['uuid'],
@@ -4694,6 +4763,33 @@ class QuotaTestCase(test.TestCase, ModelsObjectComparatorMixin):
                                                         'resource1': 1,
                                                         'resource2': 2})
 
+    def test_quota_get_all_by_project_and_user(self):
+        for i in range(3):
+            for j in range(3):
+                db.quota_create(self.ctxt, 'proj%d' % i, 'resource%d' % j, j)
+        for i in range(3):
+            quotas_db = db.quota_get_all_by_project_and_user(self.ctxt,
+                                                             'proj%d' % i,
+                                                             'user%d' % i)
+            self.assertEqual(quotas_db, {'project_id': 'proj%d' % i,
+                                         'user_id': 'user%d' % i,
+                                                        'resource0': 0,
+                                                        'resource1': 1,
+                                                        'resource2': 2})
+        for i in range(3):
+            for j in range(3):
+                db.quota_create(self.ctxt, 'proj%d' % i, 'resource%d' % j,
+                                j - 1, user_id='user%d' % i)
+        for i in range(3):
+            quotas_db = db.quota_get_all_by_project_and_user(self.ctxt,
+                                                             'proj%d' % i,
+                                                             'user%d' % i)
+            self.assertEqual(quotas_db, {'project_id': 'proj%d' % i,
+                                         'user_id': 'user%d' % i,
+                                                        'resource0': -1,
+                                                        'resource1': 0,
+                                                        'resource2': 1})
+
     def test_quota_update(self):
         db.quota_create(self.ctxt, 'project1', 'resource1', 41)
         db.quota_update(self.ctxt, 'project1', 'resource1', 42)
@@ -4773,6 +4869,25 @@ class QuotaTestCase(test.TestCase, ModelsObjectComparatorMixin):
             self.assertRaises(exception.ReservationNotFound,
                             db.reservation_get, self.ctxt, r)
 
+    def test_quota_destroy_all_by_project_and_user(self):
+        reservations = _quota_reserve(self.ctxt, 'project1', 'user1')
+        db.quota_destroy_all_by_project_and_user(self.ctxt, 'project1',
+                                                 'user1')
+        self.assertEqual(db.quota_get_all_by_project_and_user(self.ctxt,
+                            'project1', 'user1'),
+                            {'project_id': 'project1',
+                             'user_id': 'user1',
+                             'resource0': 0,
+                             'resource1': 1,
+                             'resource2': 2})
+        self.assertEqual(db.quota_usage_get_all_by_project_and_user(
+                            self.ctxt, 'project1', 'user1'),
+                            {'project_id': 'project1',
+                             'user_id': 'user1'})
+        for r in reservations:
+            self.assertRaises(exception.ReservationNotFound,
+                            db.reservation_get, self.ctxt, r)
+
     def test_quota_usage_get_nonexistent(self):
         self.assertRaises(exception.QuotaUsageNotFound, db.quota_usage_get,
             self.ctxt, 'p1', 'nonexitent_resource')
@@ -4793,6 +4908,16 @@ class QuotaTestCase(test.TestCase, ModelsObjectComparatorMixin):
                     'resource2': {'in_use': 2, 'reserved': 2}}
         self.assertEqual(expected, db.quota_usage_get_all_by_project(
                          self.ctxt, 'p1'))
+
+    def test_quota_usage_get_all_by_project_and_user(self):
+        _quota_reserve(self.ctxt, 'p1', 'u1')
+        expected = {'project_id': 'p1',
+                    'user_id': 'u1',
+                    'resource0': {'in_use': 0, 'reserved': 0},
+                    'resource1': {'in_use': 1, 'reserved': 1},
+                    'resource2': {'in_use': 2, 'reserved': 2}}
+        self.assertEqual(expected, db.quota_usage_get_all_by_project_and_user(
+                         self.ctxt, 'p1', 'u1'))
 
     def test_quota_usage_update_nonexistent(self):
         self.assertRaises(exception.QuotaUsageNotFound, db.quota_usage_update,
@@ -5353,7 +5478,7 @@ class ConsolePoolTestCase(test.TestCase, ModelsObjectComparatorMixin):
 
         self.ctxt = context.get_admin_context()
         self.test_console_pool_1 = {
-            'address': 'address_1',
+            'address': '192.168.2.10',
             'username': 'user_1',
             'password': 'secret_123',
             'console_type': 'type_1',
@@ -5362,7 +5487,7 @@ class ConsolePoolTestCase(test.TestCase, ModelsObjectComparatorMixin):
             'compute_host': '127.0.0.1',
         }
         self.test_console_pool_2 = {
-            'address': 'address_2',
+            'address': '192.168.2.11',
             'username': 'user_2',
             'password': 'secret_1234',
             'console_type': 'type_2',
@@ -5371,7 +5496,7 @@ class ConsolePoolTestCase(test.TestCase, ModelsObjectComparatorMixin):
             'compute_host': 'localhost',
         }
         self.test_console_pool_3 = {
-            'address': 'address_3',
+            'address': '192.168.2.12',
             'username': 'user_3',
             'password': 'secret_12345',
             'console_type': 'type_2',

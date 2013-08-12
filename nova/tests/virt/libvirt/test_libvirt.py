@@ -39,6 +39,7 @@ from nova.compute import vm_states
 from nova import context
 from nova import db
 from nova import exception
+from nova.objects import instance as instance_obj
 from nova.openstack.common import fileutils
 from nova.openstack.common import importutils
 from nova.openstack.common import jsonutils
@@ -607,7 +608,7 @@ class LibvirtConnTestCase(test.TestCase):
 
         self.assertEquals(type(cfg.devices[2]),
                           vconfig.LibvirtConfigGuestDisk)
-        self.assertEquals(cfg.devices[2].target_dev, 'vdz')
+        self.assertEquals(cfg.devices[2].target_dev, 'hdd')
 
     def test_get_guest_config_with_vnc(self):
         self.flags(libvirt_type='kvm',
@@ -1859,6 +1860,39 @@ class LibvirtConnTestCase(test.TestCase):
         self.assertRaises(exception.VolumeDriverNotFound,
                           conn.attach_volume,
                           {"driver_volume_type": "badtype"},
+                          {"name": "fake-instance"},
+                          "/dev/sda")
+
+    def test_attach_blockio_invalid_hypervisor(self):
+        self.flags(libvirt_type='fake_type')
+        self.create_fake_libvirt_mock()
+        libvirt_driver.LibvirtDriver._conn.lookupByName = self.fake_lookup
+        self.mox.ReplayAll()
+        conn = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), False)
+        self.assertRaises(exception.InvalidHypervisorType,
+                          conn.attach_volume,
+                          {"driver_volume_type": "fake",
+                           "data": {"logical_block_size": "4096",
+                                    "physical_block_size": "4096"}
+                          },
+                          {"name": "fake-instance"},
+                          "/dev/sda")
+
+    def test_attach_blockio_invalid_version(self):
+        def get_lib_version_stub():
+            return (0 * 1000 * 1000) + (9 * 1000) + 8
+        self.flags(libvirt_type='qemu')
+        self.create_fake_libvirt_mock()
+        libvirt_driver.LibvirtDriver._conn.lookupByName = self.fake_lookup
+        self.mox.ReplayAll()
+        conn = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), False)
+        self.stubs.Set(self.conn, "getLibVersion", get_lib_version_stub)
+        self.assertRaises(exception.Invalid,
+                          conn.attach_volume,
+                          {"driver_volume_type": "fake",
+                           "data": {"logical_block_size": "4096",
+                                    "physical_block_size": "4096"}
+                          },
                           {"name": "fake-instance"},
                           "/dev/sda")
 
@@ -3149,21 +3183,31 @@ class LibvirtConnTestCase(test.TestCase):
         def fake_lookup_by_name(instance_name):
             raise exception.InstanceNotFound(instance_id=instance_name)
 
+        def fake_delete_instance_files(instance):
+            pass
+
         conn = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), False)
         self.stubs.Set(conn, '_lookup_by_name', fake_lookup_by_name)
+        self.stubs.Set(conn, '_delete_instance_files',
+                       fake_delete_instance_files)
 
         instance = db.instance_create(self.context, self.test_instance)
         conn.destroy(instance, {})
 
     def test_destroy_removes_disk(self):
-        instance = {"name": "instancename", "id": "instanceid",
-                    "uuid": "875a8070-d0b9-4949-8b31-104d125c9a64"}
+        instance = {"name": "instancename", "id": "42",
+                    "uuid": "875a8070-d0b9-4949-8b31-104d125c9a64",
+                    "cleaned": 0, 'info_cache': None, 'security_groups': None}
 
         self.mox.StubOutWithMock(libvirt_driver.LibvirtDriver,
                                  '_undefine_domain')
         libvirt_driver.LibvirtDriver._undefine_domain(instance)
+        self.mox.StubOutWithMock(db, 'instance_get_by_uuid')
+        db.instance_get_by_uuid(mox.IgnoreArg(), mox.IgnoreArg(),
+                                columns_to_join=[]).AndReturn(instance)
         self.mox.StubOutWithMock(shutil, "rmtree")
-        shutil.rmtree(os.path.join(CONF.instances_path, instance['name']))
+        shutil.rmtree(os.path.join(CONF.instances_path,
+                                   'instance-%08x' % int(instance['id'])))
         self.mox.StubOutWithMock(libvirt_driver.LibvirtDriver, '_cleanup_lvm')
         libvirt_driver.LibvirtDriver._cleanup_lvm(instance)
 
@@ -3182,6 +3226,13 @@ class LibvirtConnTestCase(test.TestCase):
         def fake_unfilter_instance(instance, network_info):
             pass
 
+        def fake_obj_load_attr(self, attrname):
+            if not hasattr(self, attrname):
+                self[attrname] = {}
+
+        def fake_save(self, context):
+            pass
+
         conn = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), False)
 
         self.stubs.Set(conn, '_destroy', fake_destroy)
@@ -3189,6 +3240,12 @@ class LibvirtConnTestCase(test.TestCase):
         self.stubs.Set(conn.firewall_driver,
                        'unfilter_instance', fake_unfilter_instance)
         self.stubs.Set(os.path, 'exists', fake_os_path_exists)
+        self.stubs.Set(instance_obj.Instance, 'fields',
+                       {'id': int, 'uuid': str, 'cleaned': int})
+        self.stubs.Set(instance_obj.Instance, 'obj_load_attr',
+                       fake_obj_load_attr)
+        self.stubs.Set(instance_obj.Instance, 'save', fake_save)
+
         conn.destroy(instance, [])
 
     def test_destroy_not_removes_disk(self):
@@ -3222,6 +3279,41 @@ class LibvirtConnTestCase(test.TestCase):
                        'unfilter_instance', fake_unfilter_instance)
         self.stubs.Set(os.path, 'exists', fake_os_path_exists)
         conn.destroy(instance, [], None, False)
+
+    def test_delete_instance_files(self):
+        instance = {"name": "instancename", "id": "42",
+                    "uuid": "875a8070-d0b9-4949-8b31-104d125c9a64",
+                    "cleaned": 0, 'info_cache': None, 'security_groups': None}
+
+        self.mox.StubOutWithMock(db, 'instance_get_by_uuid')
+        self.mox.StubOutWithMock(os.path, 'exists')
+        self.mox.StubOutWithMock(shutil, "rmtree")
+
+        db.instance_get_by_uuid(mox.IgnoreArg(), mox.IgnoreArg(),
+                                columns_to_join=[]).AndReturn(instance)
+        os.path.exists(mox.IgnoreArg()).AndReturn(False)
+        os.path.exists(mox.IgnoreArg()).AndReturn(True)
+        shutil.rmtree(os.path.join(CONF.instances_path, instance['uuid']))
+        os.path.exists(mox.IgnoreArg()).AndReturn(True)
+        os.path.exists(mox.IgnoreArg()).AndReturn(False)
+        os.path.exists(mox.IgnoreArg()).AndReturn(True)
+        shutil.rmtree(os.path.join(CONF.instances_path, instance['uuid']))
+        os.path.exists(mox.IgnoreArg()).AndReturn(False)
+        self.mox.ReplayAll()
+
+        def fake_obj_load_attr(self, attrname):
+            if not hasattr(self, attrname):
+                self[attrname] = {}
+
+        conn = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), False)
+        self.stubs.Set(instance_obj.Instance, 'fields',
+                       {'id': int, 'uuid': str, 'cleaned': int})
+        self.stubs.Set(instance_obj.Instance, 'obj_load_attr',
+                       fake_obj_load_attr)
+
+        inst_obj = instance_obj.Instance.get_by_uuid(None, instance['uuid'])
+        self.assertFalse(conn.delete_instance_files(inst_obj))
+        self.assertTrue(conn.delete_instance_files(inst_obj))
 
     def test_reboot_different_ids(self):
         class FakeLoopingCall:
@@ -3307,6 +3399,33 @@ class LibvirtConnTestCase(test.TestCase):
         conn.reboot(None, instance, [])
         self.assertTrue(self.reboot_hard_reboot_called)
 
+    def test_soft_reboot_libvirt_exception(self):
+        # Tests that a hard reboot is performed when a soft reboot results
+        # in raising a libvirtError.
+        info_tuple = ('fake', 'fake', 'fake', 'also_fake')
+
+        # setup mocks
+        mock_domain = self.mox.CreateMock(libvirt.virDomain)
+        mock_domain.info().AndReturn(
+            (libvirt_driver.VIR_DOMAIN_RUNNING,) + info_tuple)
+        mock_domain.ID().AndReturn('some_fake_id')
+        mock_domain.shutdown().AndRaise(libvirt.libvirtError('Err'))
+
+        conn = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), False)
+        context = None
+        instance = {"name": "instancename", "id": "instanceid",
+                    "uuid": "875a8070-d0b9-4949-8b31-104d125c9a64"}
+        network_info = []
+
+        self.mox.StubOutWithMock(conn, '_lookup_by_name')
+        conn._lookup_by_name(instance['name']).AndReturn(mock_domain)
+        self.mox.StubOutWithMock(conn, '_hard_reboot')
+        conn._hard_reboot(context, instance, network_info, None)
+
+        self.mox.ReplayAll()
+
+        conn.reboot(context, instance, network_info)
+
     def test_destroy_undefines(self):
         mock = self.mox.CreateMock(libvirt.virDomain)
         mock.ID()
@@ -3321,9 +3440,15 @@ class LibvirtConnTestCase(test.TestCase):
         def fake_get_info(instance_name):
             return {'state': power_state.SHUTDOWN, 'id': -1}
 
+        def fake_delete_instance_files(instance):
+            return None
+
         conn = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), False)
         self.stubs.Set(conn, '_lookup_by_name', fake_lookup_by_name)
         self.stubs.Set(conn, 'get_info', fake_get_info)
+        self.stubs.Set(conn, '_delete_instance_files',
+                       fake_delete_instance_files)
+
         instance = {"name": "instancename", "id": "instanceid",
                     "uuid": "875a8070-d0b9-4949-8b31-104d125c9a64"}
         conn.destroy(instance, [])
@@ -3343,9 +3468,14 @@ class LibvirtConnTestCase(test.TestCase):
         def fake_get_info(instance_name):
             return {'state': power_state.SHUTDOWN, 'id': -1}
 
+        def fake_delete_instance_files(instance):
+            return None
+
         conn = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), False)
         self.stubs.Set(conn, '_lookup_by_name', fake_lookup_by_name)
         self.stubs.Set(conn, 'get_info', fake_get_info)
+        self.stubs.Set(conn, '_delete_instance_files',
+                       fake_delete_instance_files)
         instance = {"name": "instancename", "id": "instanceid",
                     "uuid": "875a8070-d0b9-4949-8b31-104d125c9a64"}
         conn.destroy(instance, [])
@@ -3367,9 +3497,14 @@ class LibvirtConnTestCase(test.TestCase):
         def fake_get_info(instance_name):
             return {'state': power_state.SHUTDOWN, 'id': -1}
 
+        def fake_delete_instance_files(instance):
+            return None
+
         conn = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), False)
         self.stubs.Set(conn, '_lookup_by_name', fake_lookup_by_name)
         self.stubs.Set(conn, 'get_info', fake_get_info)
+        self.stubs.Set(conn, '_delete_instance_files',
+                       fake_delete_instance_files)
         instance = {"name": "instancename", "id": "instanceid",
                     "uuid": "875a8070-d0b9-4949-8b31-104d125c9a64"}
         conn.destroy(instance, [])
@@ -3390,9 +3525,14 @@ class LibvirtConnTestCase(test.TestCase):
         def fake_get_info(instance_name):
             return {'state': power_state.SHUTDOWN, 'id': -1}
 
+        def fake_delete_instance_files(instance):
+            return None
+
         conn = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), False)
         self.stubs.Set(conn, '_lookup_by_name', fake_lookup_by_name)
         self.stubs.Set(conn, 'get_info', fake_get_info)
+        self.stubs.Set(conn, '_delete_instance_files',
+                       fake_delete_instance_files)
         instance = {"name": "instancename", "id": "instanceid",
                     "uuid": "875a8070-d0b9-4949-8b31-104d125c9a64"}
         conn.destroy(instance, [])
@@ -4504,7 +4644,9 @@ class IptablesFirewallTestCase(test.TestCase):
         from nova.network import linux_net
         linux_net.iptables_manager.execute = fake_iptables_execute
 
-        _fake_stub_out_get_nw_info(self.stubs, lambda *a, **kw: network_model)
+        from nova.compute import utils as compute_utils
+        self.stubs.Set(compute_utils, 'get_nw_info_for_instance',
+                       lambda instance: network_model)
 
         network_info = network_model.legacy()
         self.fw.prepare_instance_filter(instance_ref, network_info)

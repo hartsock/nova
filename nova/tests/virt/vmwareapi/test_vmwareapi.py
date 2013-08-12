@@ -28,7 +28,6 @@ from oslo.config import cfg
 from nova.compute import api as compute_api
 from nova.compute import power_state
 from nova.compute import task_states
-from nova.conductor import api as conductor_api
 from nova import context
 from nova import db
 from nova import exception
@@ -79,6 +78,16 @@ class VMwareAPIConfTestCase(test.TestCase):
         self.assertEqual("https://www.example.com/sdk/vimService.wsdl",
                          wsdl_url)
         self.assertEqual("https://www.example.com/sdk", url)
+
+    def test_configure_without_wsdl_loc_override_using_ipv6(self):
+        # Same as above but with ipv6 based host ip
+        wsdl_loc = cfg.CONF.vmware.wsdl_location
+        self.assertIsNone(wsdl_loc)
+        wsdl_url = vim.Vim.get_wsdl_url("https", "::1")
+        url = vim.Vim.get_soap_url("https", "::1")
+        self.assertEqual("https://[::1]/sdk/vimService.wsdl",
+                         wsdl_url)
+        self.assertEqual("https://[::1]/sdk", url)
 
     def test_configure_with_wsdl_loc_override(self):
         # Use the setting vmwareapi_wsdl_loc to override the
@@ -175,7 +184,7 @@ class VMwareAPIVMTestCase(test.TestCase):
 
         # Get record for VM
         vms = vmwareapi_fake._get_objects("VirtualMachine")
-        vm = vms[0]
+        vm = vms.objects[0]
 
         # Check that m1.large above turned into the right thing.
         mem_kib = long(self.type_data['memory_mb']) << 10
@@ -285,10 +294,8 @@ class VMwareAPIVMTestCase(test.TestCase):
 
     def test_poll_rebooting_instances(self):
         self.mox.StubOutWithMock(compute_api.API, 'reboot')
-        self.mox.StubOutWithMock(conductor_api.API, 'compute_reboot')
-        conductor_api.API.compute_reboot(mox.IgnoreArg(), mox.IgnoreArg(),
-                                         mox.IgnoreArg())
-        # mox will detect if compute_api.API.reboot is called unexpectedly
+        compute_api.API.reboot(mox.IgnoreArg(), mox.IgnoreArg(),
+                               mox.IgnoreArg())
         self.mox.ReplayAll()
         self._create_vm()
         instances = [self.instance]
@@ -521,10 +528,10 @@ class VMwareAPIVMTestCase(test.TestCase):
 
         def fake_get_vm_ref_from_name(session, vm_name):
             self.assertEquals(self.vm_name, vm_name)
-            return vmwareapi_fake._get_objects("VirtualMachine")[0]
+            return vmwareapi_fake._get_objects("VirtualMachine").objects[0]
 
         def fake_get_vm_ref_from_uuid(session, vm_uuid):
-            return vmwareapi_fake._get_objects("VirtualMachine")[0]
+            return vmwareapi_fake._get_objects("VirtualMachine").objects[0]
 
         def fake_call_method(*args, **kwargs):
             pass
@@ -645,7 +652,7 @@ class VMwareAPIVCDriverTestCase(VMwareAPIVMTestCase):
     def setUp(self):
         super(VMwareAPIVCDriverTestCase, self).setUp()
         self.flags(cluster_name='test_cluster',
-                   task_poll_interval=10, group='vmware')
+                   task_poll_interval=10, datastore_regex='.*', group='vmware')
         self.flags(vnc_enabled=False)
         self.conn = driver.VMwareVCDriver(None, False)
 
@@ -663,3 +670,10 @@ class VMwareAPIVCDriverTestCase(VMwareAPIVMTestCase):
         self.assertEquals(stats['hypervisor_type'], 'VMware ESXi')
         self.assertEquals(stats['hypervisor_version'], '5.0.0')
         self.assertEquals(stats['hypervisor_hostname'], 'test_url')
+
+    def test_invalid_datastore_regex(self):
+        # Tests if we raise an exception for Invalid Regular Expression in
+        # vmware_datastore_regex
+        self.flags(cluster_name='test_cluster', datastore_regex='fake-ds(01',
+                   group='vmware')
+        self.assertRaises(exception.InvalidInput, driver.VMwareVCDriver, None)

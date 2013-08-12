@@ -31,9 +31,9 @@ import uuid
 from oslo.config import cfg
 
 from nova import block_device
+from nova import compute
 from nova.compute import power_state
 from nova.compute import task_states
-from nova import conductor
 from nova import context as nova_context
 from nova import exception
 from nova.openstack.common import excutils
@@ -76,13 +76,15 @@ RESIZE_TOTAL_STEPS = 4
 class VMwareVMOps(object):
     """Management class for VM-related tasks."""
 
-    def __init__(self, session, virtapi, volumeops, cluster=None):
+    def __init__(self, session, virtapi, volumeops, cluster=None,
+                 datastore_regex=None):
         """Initializer."""
-        self.conductor_api = conductor.API()
+        self.compute_api = compute.API()
         self._session = session
         self._virtapi = virtapi
         self._volumeops = volumeops
         self._cluster = cluster
+        self._datastore_regex = datastore_regex
         self._instance_path_base = VMWARE_PREFIX + CONF.base_dir_name
         self._default_root_device = 'vda'
         self._rescue_suffix = '-rescue'
@@ -95,17 +97,27 @@ class VMwareVMOps(object):
                      "VirtualMachine",
                      ["name", "runtime.connectionState"])
         lst_vm_names = []
-        for vm in vms:
-            vm_name = None
-            conn_state = None
-            for prop in vm.propSet:
-                if prop.name == "name":
-                    vm_name = prop.val
-                elif prop.name == "runtime.connectionState":
-                    conn_state = prop.val
-            # Ignoring the orphaned or inaccessible VMs
-            if conn_state not in ["orphaned", "inaccessible"]:
-                lst_vm_names.append(vm_name)
+
+        while vms:
+            token = vm_util._get_token(vms)
+            for vm in vms.objects:
+                vm_name = None
+                conn_state = None
+                for prop in vm.propSet:
+                    if prop.name == "name":
+                        vm_name = prop.val
+                    elif prop.name == "runtime.connectionState":
+                        conn_state = prop.val
+                # Ignoring the orphaned or inaccessible VMs
+                if conn_state not in ["orphaned", "inaccessible"]:
+                    lst_vm_names.append(vm_name)
+            if token:
+                vms = self._session._call_method(vim_util,
+                                                 "continue_to_get_objects",
+                                                 token)
+            else:
+                break
+
         LOG.debug(_("Got total of %s instances") % str(len(lst_vm_names)))
         return lst_vm_names
 
@@ -134,7 +146,8 @@ class VMwareVMOps(object):
 
         client_factory = self._session._get_vim().client.factory
         service_content = self._session._get_vim().get_service_content()
-        ds = vm_util.get_datastore_ref_and_name(self._session, self._cluster)
+        ds = vm_util.get_datastore_ref_and_name(self._session, self._cluster,
+                 datastore_regex=self._datastore_regex)
         data_store_ref = ds[0]
         data_store_name = ds[1]
 
@@ -580,6 +593,22 @@ class VMwareVMOps(object):
 
         _clean_temp_data()
 
+    def _get_values_from_object_properties(self, props, query):
+        while props:
+            token = vm_util._get_token(props)
+            for elem in props.objects:
+                for prop in elem.propSet:
+                    for key in query.keys():
+                        if prop.name == key:
+                            query[key] = prop.val
+                            break
+            if token:
+                props = self._session._call_method(vim_util,
+                                                   "continue_to_get_objects",
+                                                   token)
+            else:
+                break
+
     def reboot(self, instance, network_info):
         """Reboot a VM instance."""
         vm_ref = vm_util.get_vm_ref(self._session, instance)
@@ -590,17 +619,13 @@ class VMwareVMOps(object):
         props = self._session._call_method(vim_util, "get_object_properties",
                            None, vm_ref, "VirtualMachine",
                            lst_properties)
-        pwr_state = None
-        tools_status = None
-        tools_running_status = False
-        for elem in props:
-            for prop in elem.propSet:
-                if prop.name == "runtime.powerState":
-                    pwr_state = prop.val
-                elif prop.name == "summary.guest.toolsStatus":
-                    tools_status = prop.val
-                elif prop.name == "summary.guest.toolsRunningStatus":
-                    tools_running_status = prop.val
+        query = {'runtime.powerState': None,
+                 'summary.guest.toolsStatus': None,
+                 'summary.guest.toolsRunningStatus': False}
+        self._get_values_from_object_properties(props, query)
+        pwr_state = query['runtime.powerState']
+        tools_status = query['summary.guest.toolsStatus']
+        tools_running_status = query['summary.guest.toolsRunningStatus']
 
         # Raise an exception if the VM is not powered On.
         if pwr_state not in ["poweredOn"]:
@@ -660,14 +685,11 @@ class VMwareVMOps(object):
             props = self._session._call_method(vim_util,
                         "get_object_properties",
                         None, vm_ref, "VirtualMachine", lst_properties)
-            pwr_state = None
-            for elem in props:
-                vm_config_pathname = None
-                for prop in elem.propSet:
-                    if prop.name == "runtime.powerState":
-                        pwr_state = prop.val
-                    elif prop.name == "config.files.vmPathName":
-                        vm_config_pathname = prop.val
+            query = {'runtime.powerState': None,
+                     'config.files.vmPathName': None}
+            self._get_values_from_object_properties(props, query)
+            pwr_state = query['runtime.powerState']
+            vm_config_pathname = query['config.files.vmPathName']
             if vm_config_pathname:
                 _ds_path = vm_util.split_datastore_path(vm_config_pathname)
                 datastore_name, vmx_file_path = _ds_path
@@ -1028,7 +1050,7 @@ class VMwareVMOps(object):
 
         for instance in instances:
             LOG.info(_("Automatically hard rebooting"), instance=instance)
-            self.conductor_api.compute_reboot(ctxt, instance, "HARD")
+            self.compute_api.reboot(ctxt, instance, "HARD")
 
     def get_info(self, instance):
         """Return data about the VM instance."""
@@ -1040,23 +1062,15 @@ class VMwareVMOps(object):
         vm_props = self._session._call_method(vim_util,
                     "get_object_properties", None, vm_ref, "VirtualMachine",
                     lst_properties)
-        max_mem = None
-        pwr_state = None
-        num_cpu = None
-        for elem in vm_props:
-            for prop in elem.propSet:
-                if prop.name == "summary.config.numCpu":
-                    num_cpu = int(prop.val)
-                elif prop.name == "summary.config.memorySizeMB":
-                    # In MB, but we want in KB
-                    max_mem = int(prop.val) * 1024
-                elif prop.name == "runtime.powerState":
-                    pwr_state = VMWARE_POWER_STATES[prop.val]
-
-        return {'state': pwr_state,
+        query = {'summary.config.numCpu': None,
+                 'summary.config.memorySizeMB': None,
+                 'runtime.powerState': None}
+        self._get_values_from_object_properties(vm_props, query)
+        max_mem = int(query['summary.config.memorySizeMB']) * 1024
+        return {'state': VMWARE_POWER_STATES[query['runtime.powerState']],
                 'max_mem': max_mem,
                 'mem': max_mem,
-                'num_cpu': num_cpu,
+                'num_cpu': int(query['summary.config.numCpu']),
                 'cpu_time': 0}
 
     def get_diagnostics(self, instance):
@@ -1191,12 +1205,14 @@ class VMwareVMOps(object):
         """Get the datacenter name and the reference."""
         dc_obj = self._session._call_method(vim_util, "get_objects",
                 "Datacenter", ["name"])
-        return dc_obj[0].obj, dc_obj[0].propSet[0].val
+        vm_util._cancel_retrieve_if_necessary(self._session, dc_obj)
+        return dc_obj.objects[0].obj, dc_obj.objects[0].propSet[0].val
 
     def _get_host_ref_from_name(self, host_name):
         """Get reference to the host with the name specified."""
         host_objs = self._session._call_method(vim_util, "get_objects",
                     "HostSystem", ["name"])
+        vm_util._cancel_retrieve_if_necessary(self._session, host_objs)
         for host in host_objs:
             if host.propSet[0].val == host_name:
                 return host.obj
@@ -1206,16 +1222,19 @@ class VMwareVMOps(object):
         """Get the Vm folder ref from the datacenter."""
         dc_objs = self._session._call_method(vim_util, "get_objects",
                                              "Datacenter", ["vmFolder"])
+        vm_util._cancel_retrieve_if_necessary(self._session, dc_objs)
         # There is only one default datacenter in a standalone ESX host
-        vm_folder_ref = dc_objs[0].propSet[0].val
+        vm_folder_ref = dc_objs.objects[0].propSet[0].val
         return vm_folder_ref
 
     def _get_res_pool_ref(self):
         # Get the resource pool. Taking the first resource pool coming our
         # way. Assuming that is the default resource pool.
         if self._cluster is None:
-            res_pool_ref = self._session._call_method(vim_util, "get_objects",
-                                                      "ResourcePool")[0].obj
+            results = self._session._call_method(vim_util, "get_objects",
+                    "ResourcePool")
+            vm_util._cancel_retrieve_if_necessary(self._session, results)
+            res_pool_ref = results.objects[0].obj
         else:
             res_pool_ref = self._session._call_method(vim_util,
                                                       "get_dynamic_property",

@@ -334,18 +334,12 @@ class LocalAPI(object):
     def get_ec2_ids(self, context, instance):
         return self._manager.get_ec2_ids(context, instance)
 
-    def compute_stop(self, context, instance, do_cast=True):
-        return self._manager.compute_stop(context, instance, do_cast)
-
     def compute_confirm_resize(self, context, instance, migration_ref):
         return self._manager.compute_confirm_resize(context, instance,
                                                     migration_ref)
 
     def compute_unrescue(self, context, instance):
         return self._manager.compute_unrescue(context, instance)
-
-    def compute_reboot(self, context, instance, reboot_type):
-        return self._manager.compute_reboot(context, instance, reboot_type)
 
 
 class LocalComputeTaskAPI(object):
@@ -356,9 +350,11 @@ class LocalComputeTaskAPI(object):
                 manager.ComputeTaskManager())
 
     def migrate_server(self, context, instance, scheduler_hint, live, rebuild,
-                  flavor, block_migration, disk_over_commit):
-        return self._manager.migrate_server(context, instance, scheduler_hint,
-            live, rebuild, flavor, block_migration, disk_over_commit)
+                  flavor, block_migration, disk_over_commit,
+                  reservations=None):
+        self._manager.migrate_server(
+            context, instance, scheduler_hint, live, rebuild, flavor,
+            block_migration, disk_over_commit, reservations)
 
     def build_instances(self, context, instances, image,
             filter_properties, admin_password, injected_files,
@@ -426,10 +422,11 @@ class ComputeTaskAPI(object):
         self.conductor_compute_rpcapi = rpcapi.ComputeTaskAPI()
 
     def migrate_server(self, context, instance, scheduler_hint, live, rebuild,
-                  flavor, block_migration, disk_over_commit):
-        return self.conductor_compute_rpcapi.migrate_server(context, instance,
-            scheduler_hint, live, rebuild, flavor, block_migration,
-            disk_over_commit)
+                  flavor, block_migration, disk_over_commit,
+                  reservations=None):
+        self.conductor_compute_rpcapi.migrate_server(
+            context, instance, scheduler_hint, live, rebuild,
+            flavor, block_migration, disk_over_commit, reservations)
 
     def build_instances(self, context, instances, image, filter_properties,
             admin_password, injected_files, requested_networks,

@@ -17,6 +17,7 @@ import copy
 from nova.cells import opts as cells_opts
 from nova.cells import rpcapi as cells_rpcapi
 from nova import db
+from nova import exception
 from nova import notifications
 from nova.objects import base
 from nova.objects import instance_fault
@@ -47,7 +48,9 @@ class Instance(base.NovaObject):
     # Version 1.2: Added security_groups
     # Version 1.3: Added expected_vm_state and admin_state_reset to
     #              save()
-    VERSION = '1.3'
+    # Version 1.4: Added locked_by and deprecated locked
+    # Version 1.5: Added cleaned
+    VERSION = '1.5'
 
     fields = {
         'id': int,
@@ -92,7 +95,11 @@ class Instance(base.NovaObject):
         'display_description': obj_utils.str_or_none,
 
         'launched_on': obj_utils.str_or_none,
+
+        # NOTE(jdillaman): locked deprecated in favor of locked_by,
+        # to be removed in Icehouse
         'locked': bool,
+        'locked_by': obj_utils.str_or_none,
 
         'os_type': obj_utils.str_or_none,
         'architecture': obj_utils.str_or_none,
@@ -126,6 +133,8 @@ class Instance(base.NovaObject):
 
         'fault': obj_utils.nested_object_or_none(
             instance_fault.InstanceFault),
+
+        'cleaned': bool,
 
         }
 
@@ -215,14 +224,15 @@ class Instance(base.NovaObject):
                 continue
             elif field == 'deleted':
                 instance.deleted = db_inst['deleted'] == db_inst['id']
+            elif field == 'cleaned':
+                instance.cleaned = db_inst['cleaned'] == 1
             else:
                 instance[field] = db_inst[field]
 
         if 'metadata' in expected_attrs:
-            instance['metadata'] = utils.metadata_to_dict(db_inst['metadata'])
+            instance['metadata'] = utils.instance_meta(db_inst)
         if 'system_metadata' in expected_attrs:
-            instance['system_metadata'] = utils.metadata_to_dict(
-                db_inst['system_metadata'])
+            instance['system_metadata'] = utils.instance_sys_meta(db_inst)
         if 'fault' in expected_attrs:
             instance['fault'] = (
                 instance_fault.InstanceFault.get_latest_for_instance(
@@ -235,7 +245,7 @@ class Instance(base.NovaObject):
             instance_info_cache.InstanceInfoCache._from_db_object(
                     context, instance['info_cache'], db_inst['info_cache'])
         if ('security_groups' in expected_attrs and
-                db_inst.get('security_groups')):
+                db_inst.get('security_groups') is not None):
             instance['security_groups'] = security_group.SecurityGroupList()
             security_group._make_secgroup_list(context,
                                                instance['security_groups'],
@@ -265,8 +275,8 @@ class Instance(base.NovaObject):
         columns_to_join = cls._attrs_to_columns(expected_attrs)
         db_inst = db.instance_get_by_uuid(context, uuid,
                                           columns_to_join=columns_to_join)
-        return Instance._from_db_object(context, cls(), db_inst,
-                                        expected_attrs)
+        return cls._from_db_object(context, cls(), db_inst,
+                                   expected_attrs)
 
     @base.remotable_classmethod
     def get_by_id(cls, context, inst_id, expected_attrs=None):
@@ -275,8 +285,49 @@ class Instance(base.NovaObject):
         columns_to_join = cls._attrs_to_columns(expected_attrs)
         db_inst = db.instance_get(context, inst_id,
                                   columns_to_join=columns_to_join)
-        return Instance._from_db_object(context, cls(), db_inst,
-                                        expected_attrs)
+        return cls._from_db_object(context, cls(), db_inst,
+                                   expected_attrs)
+
+    @base.remotable
+    def create(self, context):
+        if self.obj_attr_is_set('id'):
+            raise exception.ObjectActionError(action='create',
+                                              reason='already created')
+        updates = {}
+        for attr in self.obj_what_changed() - set(['id']):
+            updates[attr] = self[attr]
+        expected_attrs = [attr for attr in INSTANCE_DEFAULT_FIELDS
+                          if attr in updates]
+        if 'security_groups' in updates:
+            updates['security_groups'] = [x.name for x in
+                                          updates['security_groups']]
+        if 'info_cache' in updates:
+            updates['info_cache'] = {
+                'network_info': updates['info_cache'].network_info.json()
+                }
+        db_inst = db.instance_create(context, updates)
+        Instance._from_db_object(context, self, db_inst, expected_attrs)
+
+    @base.remotable
+    def destroy(self, context):
+        if not self.obj_attr_is_set('id'):
+            raise exception.ObjectActionError(action='destroy',
+                                              reason='already destroyed')
+        if not self.obj_attr_is_set('uuid'):
+            raise exception.ObjectActionError(action='destroy',
+                                              reason='no uuid')
+        if not self.obj_attr_is_set('host') or not self.host:
+            # NOTE(danms): If our host is not set, avoid a race
+            constraint = db.constraint(host=db.equal_any(None))
+        else:
+            constraint = None
+
+        try:
+            db.instance_destroy(context, self.uuid, constraint=constraint)
+        except exception.ConstraintNotMet:
+            raise exception.ObjectActionError(action='destroy',
+                                              reason='host changed')
+        delattr(self, base.get_attrname('id'))
 
     def _save_info_cache(self, context):
         self.info_cache.save(context)
@@ -343,6 +394,13 @@ class Instance(base.NovaObject):
                 _handle_cell_update_from_api()
             return
 
+        # Cleaned needs to be turned back into an int here
+        if 'cleaned' in updates:
+            if updates['cleaned']:
+                updates['cleaned'] = 1
+            else:
+                updates['cleaned'] = 0
+
         if expected_task_state is not None:
             updates['expected_task_state'] = expected_task_state
         if expected_vm_state is not None:
@@ -361,7 +419,7 @@ class Instance(base.NovaObject):
         for attr in INSTANCE_OPTIONAL_FIELDS:
             if hasattr(self, base.get_attrname(attr)):
                 expected_attrs.append(attr)
-        Instance._from_db_object(context, self, inst_ref, expected_attrs)
+        self._from_db_object(context, self, inst_ref, expected_attrs)
         if 'vm_state' in changes or 'task_state' in changes:
             notifications.send_update(context, old_ref, inst_ref)
         self.obj_reset_changes()
@@ -394,7 +452,9 @@ class Instance(base.NovaObject):
             extra.append('fault')
 
         if not extra:
-            raise Exception('Cannot load "%s" from instance' % attrname)
+            raise exception.ObjectActionError(
+                action='obj_load_attr',
+                reason='attribute %s not lazy-loadable' % attrname)
 
         # NOTE(danms): This could be optimized to just load the bits we need
         instance = self.__class__.get_by_uuid(self._context,
@@ -405,7 +465,9 @@ class Instance(base.NovaObject):
         if hasattr(instance, base.get_attrname(attrname)):
             self[attrname] = instance[attrname]
         else:
-            raise Exception('Cannot load "%s" from instance' % attrname)
+            raise exception.ObjectActionError(
+                action='obj_load_attr',
+                reason='loading %s requires recursion' % attrname)
 
 
 def _make_instance_list(context, inst_list, db_inst_list, expected_attrs):

@@ -853,6 +853,23 @@ class _TargetedMessageMethods(_BaseMessageMethods):
         """Resume an instance via compute_api.suspend()."""
         self._call_compute_api_with_obj(message.ctxt, instance, 'resume')
 
+    def get_host_uptime(self, message, host_name):
+        return self.host_api.get_host_uptime(message.ctxt, host_name)
+
+    def terminate_instance(self, message, instance):
+        self._call_compute_api_with_obj(message.ctxt, instance, 'delete')
+
+    def soft_delete_instance(self, message, instance):
+        self._call_compute_api_with_obj(message.ctxt, instance, 'soft_delete')
+
+    def pause_instance(self, message, instance):
+        """Pause an instance via compute_api.pause()."""
+        self._call_compute_api_with_obj(message.ctxt, instance, 'pause')
+
+    def unpause_instance(self, message, instance):
+        """Unpause an instance via compute_api.pause()."""
+        self._call_compute_api_with_obj(message.ctxt, instance, 'unpause')
+
 
 class _BroadcastMessageMethods(_BaseMessageMethods):
     """These are the methods that can be called as a part of a broadcast
@@ -1369,6 +1386,14 @@ class MessageRunner(object):
                                   need_response=True)
         return message.process()
 
+    def get_host_uptime(self, ctxt, cell_name, host_name):
+        method_kwargs = dict(host_name=host_name)
+        message = _TargetedMessage(self, ctxt,
+                                   'get_host_uptime',
+                                   method_kwargs, 'down', cell_name,
+                                   need_response=True)
+        return message.process()
+
     def service_update(self, ctxt, cell_name, host_name, binary,
                        params_to_update):
         """
@@ -1585,6 +1610,20 @@ class MessageRunner(object):
     def resume_instance(self, ctxt, instance):
         """Resume an instance in its cell."""
         self._instance_action(ctxt, instance, 'resume_instance')
+
+    def terminate_instance(self, ctxt, instance):
+        self._instance_action(ctxt, instance, 'terminate_instance')
+
+    def soft_delete_instance(self, ctxt, instance):
+        self._instance_action(ctxt, instance, 'soft_delete_instance')
+
+    def pause_instance(self, ctxt, instance):
+        """Pause an instance in its cell."""
+        self._instance_action(ctxt, instance, 'pause_instance')
+
+    def unpause_instance(self, ctxt, instance):
+        """Unpause an instance in its cell."""
+        self._instance_action(ctxt, instance, 'unpause_instance')
 
     @staticmethod
     def get_message_types():

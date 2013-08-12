@@ -21,7 +21,7 @@
 SQLAlchemy models for nova data.
 """
 
-from sqlalchemy import Column, Index, Integer, BigInteger, String, schema
+from sqlalchemy import Column, Index, Integer, BigInteger, Enum, String, schema
 from sqlalchemy.dialects.mysql import MEDIUMTEXT
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy import ForeignKey, DateTime, Boolean, Text, Float
@@ -167,7 +167,9 @@ class Instance(BASE, NovaBase):
         Index('instances_task_state_updated_at_idx',
               'task_state', 'updated_at'),
         Index('instances_host_node_deleted_idx',
-              'host', 'node', 'deleted')
+              'host', 'node', 'deleted'),
+        Index('instances_host_deleted_cleaned_idx',
+              'host', 'deleted', 'cleaned'),
     )
     injected_files = []
 
@@ -246,7 +248,11 @@ class Instance(BASE, NovaBase):
     # To remember on which host an instance booted.
     # An instance may have moved to another host by live migration.
     launched_on = Column(Text, nullable=True)
+
+    # NOTE(jdillaman): locked deprecated in favor of locked_by,
+    # to be removed in Icehouse
     locked = Column(Boolean, nullable=True)
+    locked_by = Column(Enum('owner', 'admin'), nullable=True)
 
     os_type = Column(String(255), nullable=True)
     architecture = Column(String(255), nullable=True)
@@ -279,6 +285,9 @@ class Instance(BASE, NovaBase):
     # OpenStack compute cell name.  This will only be set at the top of
     # the cells tree and it'll be a full cell name such as 'api!hop1!hop2'
     cell_name = Column(String(255), nullable=True)
+
+    # Records whether an instance has been deleted from disk
+    cleaned = Column(Integer, default=0)
 
 
 class InstanceInfoCache(BASE, NovaBase):
@@ -470,6 +479,7 @@ class Reservation(BASE, NovaBase):
     __tablename__ = 'reservations'
     __table_args__ = (
         Index('ix_reservations_project_id', 'project_id'),
+        Index('reservations_uuid_idx', 'uuid'),
     )
     id = Column(Integer, primary_key=True, nullable=False)
     uuid = Column(String(36), nullable=False)

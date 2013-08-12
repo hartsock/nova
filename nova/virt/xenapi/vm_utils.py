@@ -23,13 +23,11 @@ their attributes like VDIs, VIFs, as well as their lookup functions.
 
 import contextlib
 import os
-import pkg_resources
 import re
 import time
 import urllib
 import urlparse
 import uuid
-from xml.dom import minidom
 from xml.parsers import expat
 
 from eventlet import greenthread
@@ -44,10 +42,12 @@ from nova import exception
 from nova.image import glance
 from nova.openstack.common import excutils
 from nova.openstack.common.gettextutils import _
+from nova.openstack.common import importutils
 from nova.openstack.common import log as logging
 from nova.openstack.common import processutils
 from nova.openstack.common import strutils
 from nova.openstack.common import timeutils
+from nova.openstack.common import xmlutils
 from nova import utils
 from nova.virt import configdrive
 from nova.virt.disk import api as disk
@@ -75,10 +75,11 @@ xenapi_vm_utils_opts = [
                default=16 * 1024 * 1024,
                help='Maximum size in bytes of kernel or ramdisk images'),
     cfg.StrOpt('sr_matching_filter',
-               default='other-config:i18n-key=local-storage',
+               default='default-sr:true',
                help='Filter for finding the SR to be used to install guest '
-                    'instances on. The default value is the Local Storage in '
-                    'default XenServer/XCP installations. To select an SR '
+                    'instances on. To use the Local Storage in default '
+                    'XenServer/XCP installations set this flag to '
+                    'other-config:i18n-key=local-storage. To select an SR '
                     'with a different matching criteria, you could set it to '
                     'other-config:my_favorite_sr=true. On the other hand, to '
                     'fall back on the Default SR, as displayed by XenCenter, '
@@ -96,35 +97,6 @@ xenapi_vm_utils_opts = [
                default='none',
                help='Whether or not to download images via Bit Torrent '
                     '(all|some|none).'),
-    cfg.StrOpt('xenapi_torrent_base_url',
-               default=None,
-               help='Base URL for torrent files.'),
-    cfg.FloatOpt('xenapi_torrent_seed_chance',
-                 default=1.0,
-                 help='Probability that peer will become a seeder.'
-                      ' (1.0 = 100%)'),
-    cfg.IntOpt('xenapi_torrent_seed_duration',
-               default=3600,
-               help='Number of seconds after downloading an image via'
-                    ' BitTorrent that it should be seeded for other peers.'),
-    cfg.IntOpt('xenapi_torrent_max_last_accessed',
-               default=86400,
-               help='Cached torrent files not accessed within this number of'
-                    ' seconds can be reaped'),
-    cfg.IntOpt('xenapi_torrent_listen_port_start',
-               default=6881,
-               help='Beginning of port range to listen on'),
-    cfg.IntOpt('xenapi_torrent_listen_port_end',
-               default=6891,
-               help='End of port range to listen on'),
-    cfg.IntOpt('xenapi_torrent_download_stall_cutoff',
-               default=600,
-               help='Number of seconds a download can remain at the same'
-                    ' progress percentage w/o being considered a stall'),
-    cfg.IntOpt('xenapi_torrent_max_seeder_processes_per_host',
-               default=1,
-               help='Maximum number of seeder processes to run concurrently'
-                    ' within a given dom0. (-1 = no limit)')
     ]
 
 CONF = cfg.CONF
@@ -1106,36 +1078,6 @@ def _fetch_image(context, session, instance, name_label, image_id, image_type):
     return vdis
 
 
-def _fetch_using_dom0_plugin_with_retry(context, session, image_id,
-                                        plugin_name, params, callback=None):
-    max_attempts = CONF.glance_num_retries + 1
-    sleep_time = 0.5
-    for attempt_num in xrange(1, max_attempts + 1):
-        LOG.info(_('download_vhd %(image_id)s, attempt '
-                   '%(attempt_num)d/%(max_attempts)d, params: %(params)s'),
-                 {'image_id': image_id, 'attempt_num': attempt_num,
-                  'max_attempts': max_attempts, 'params': params})
-
-        try:
-            if callback:
-                callback(params)
-
-            return session.call_plugin_serialized(
-                    plugin_name, 'download_vhd', **params)
-        except session.XenAPI.Failure as exc:
-            _type, _method, error = exc.details[:3]
-            if error == 'RetryableError':
-                LOG.error(_('download_vhd failed: %r') %
-                          (exc.details[3:],))
-            else:
-                raise
-
-        time.sleep(sleep_time)
-        sleep_time = min(2 * sleep_time, 15)
-
-    raise exception.CouldNotFetchImage(image_id=image_id)
-
-
 def _make_uuid_stack():
     # NOTE(sirp): The XenAPI plugins run under Python 2.4
     # which does not have the `uuid` module. To work around this,
@@ -1166,6 +1108,20 @@ def _image_uses_bittorrent(context, instance):
     return bittorrent
 
 
+def _default_download_handler():
+    # TODO(sirp):  This should be configurable like upload_handler
+    return importutils.import_object(
+            'nova.virt.xenapi.image.glance.GlanceStore')
+
+
+def _choose_download_handler(context, instance):
+    if _image_uses_bittorrent(context, instance):
+        return importutils.import_object(
+                'nova.virt.xenapi.image.bittorrent.BittorrentStore')
+    else:
+        return _default_download_handler()
+
+
 def _fetch_vhd_image(context, session, instance, image_id):
     """Tell glance to download an image and put the VHDs into the SR
 
@@ -1174,23 +1130,24 @@ def _fetch_vhd_image(context, session, instance, image_id):
     LOG.debug(_("Asking xapi to fetch vhd image %s"), image_id,
               instance=instance)
 
-    params = {'image_id': image_id,
-              'uuid_stack': _make_uuid_stack(),
-              'sr_path': get_sr_path(session)}
+    handler = _choose_download_handler(context, instance)
 
-    if (_image_uses_bittorrent(context, instance) and
-            _add_torrent_url(instance, image_id, params)):
+    try:
+        vdis = handler.download_image(context, session, instance, image_id)
+    except Exception as e:
+        default_handler = _default_download_handler()
 
-        plugin_name = 'bittorrent'
-        callback = None
-        _add_bittorrent_params(image_id, params)
-    else:
-        plugin_name = 'glance'
-        callback = _generate_glance_callback(context)
+        if handler == default_handler:
+            raise
 
-    vdis = _fetch_using_dom0_plugin_with_retry(
-            context, session, image_id, plugin_name, params,
-            callback=callback)
+        LOG.exception(_("Download handler '%(handler)s' raised an"
+                        " exception, falling back to default handler"
+                        " '%(default_handler)s'") %
+                        {'handler': handler,
+                         'default_handler': default_handler})
+
+        vdis = default_handler.download_image(
+                context, session, instance, image_id)
 
     sr_ref = safe_find_sr(session)
     _scan_sr(session, sr_ref)
@@ -1206,89 +1163,6 @@ def _fetch_vhd_image(context, session, instance, image_id):
                 destroy_vdi(session, vdi_ref)
 
     return vdis
-
-
-def _generate_glance_callback(context):
-    glance_api_servers = glance.get_api_servers()
-
-    def pick_glance(params):
-        g_host, g_port, g_use_ssl = glance_api_servers.next()
-        params['glance_host'] = g_host
-        params['glance_port'] = g_port
-        params['glance_use_ssl'] = g_use_ssl
-        params['auth_token'] = getattr(context, 'auth_token', None)
-
-    return pick_glance
-
-
-_TORRENT_URL_FN = None  # driver function to determine torrent URL to use
-
-
-def _lookup_torrent_url_fn():
-    """Load a "fetcher" func to get the right torrent URL via entrypoints."""
-    namespace = "nova.virt.xenapi.vm_utils"
-    name = "torrent_url"
-
-    eps = pkg_resources.iter_entry_points(namespace)
-    eps = [ep for ep in eps if ep.name == name]
-
-    x = len(eps)
-
-    if x == 0:
-        LOG.debug(_("No torrent URL fetcher extension found."))
-        return None
-    elif x > 1:
-        raise RuntimeError(_("Multiple torrent URL fetcher extension found.  "
-                             "Failing."))
-
-    ep = eps[0]
-    LOG.debug(_("Loading torrent URL fetcher from entry points %(ep)s"),
-              {'ep': ep})
-    fn = ep.load()
-    return fn
-
-
-def _add_torrent_url(instance, image_id, params):
-    """Add the torrent URL associated with the given image.
-
-    :param instance: instance ref
-    :param image_id: unique id of image
-    :param params: BT params dict
-    :returns: True if the URL could be obtained
-    """
-    global _TORRENT_URL_FN
-    if not _TORRENT_URL_FN:
-        fn = _lookup_torrent_url_fn()
-        if fn is None:
-            LOG.debug(_("No torrent URL fetcher installed."))
-            _TORRENT_URL_FN = get_torrent_url  # default
-        else:
-            _TORRENT_URL_FN = fn
-
-    try:
-        url = _TORRENT_URL_FN(instance, image_id)
-        params['torrent_url'] = url
-        return True
-    except Exception:
-        LOG.exception(_("Failed to get torrent URL for image %s") % image_id)
-        return False  # fall back to using glance
-
-
-def get_torrent_url(instance, image_id):
-    return urlparse.urljoin(CONF.xenapi_torrent_base_url,
-                            "%s.torrent" % image_id)
-
-
-def _add_bittorrent_params(image_id, params):
-    params['torrent_seed_duration'] = CONF.xenapi_torrent_seed_duration
-    params['torrent_seed_chance'] = CONF.xenapi_torrent_seed_chance
-    params['torrent_max_last_accessed'] = CONF.xenapi_torrent_max_last_accessed
-    params['torrent_listen_port_start'] = CONF.xenapi_torrent_listen_port_start
-    params['torrent_listen_port_end'] = CONF.xenapi_torrent_listen_port_end
-    params['torrent_download_stall_cutoff'] = \
-            CONF.xenapi_torrent_download_stall_cutoff
-    params['torrent_max_seeder_processes_per_host'] = \
-            CONF.xenapi_torrent_max_seeder_processes_per_host
 
 
 def _get_vdi_chain_size(session, vdi_uuid):
@@ -1436,24 +1310,27 @@ def determine_disk_image_type(image_meta):
     disk_format = image_meta['disk_format']
 
     disk_format_map = {
-        'ami': 'DISK',
-        'aki': 'KERNEL',
-        'ari': 'RAMDISK',
-        'raw': 'DISK_RAW',
-        'vhd': 'DISK_VHD',
-        'iso': 'DISK_ISO',
+        'ami': ImageType.DISK,
+        'aki': ImageType.KERNEL,
+        'ari': ImageType.RAMDISK,
+        'raw': ImageType.DISK_RAW,
+        'vhd': ImageType.DISK_VHD,
+        'iso': ImageType.DISK_ISO,
     }
 
     try:
-        image_type_str = disk_format_map[disk_format]
+        image_type = disk_format_map[disk_format]
     except KeyError:
         raise exception.InvalidDiskFormat(disk_format=disk_format)
 
-    image_type = getattr(ImageType, image_type_str)
-
     image_ref = image_meta['id']
+
+    params = {
+        'image_type_str': ImageType.to_string(image_type),
+        'image_ref': image_ref
+    }
     LOG.debug(_("Detected %(image_type_str)s format for image %(image_ref)s"),
-              {'image_type_str': image_type_str, 'image_ref': image_ref})
+              params)
 
     return image_type
 
@@ -1463,21 +1340,15 @@ def determine_is_pv(session, vdi_ref, disk_image_type, os_type):
     Determine whether the VM will use a paravirtualized kernel or if it
     will use hardware virtualization.
 
-        1. Glance (VHD): then we use `os_type`, raise if not set
+        1. Glance (VHD): if `os_type` is windows, HVM, otherwise PV
 
-        2. Glance (DISK_RAW): use Pygrub to figure out if pv kernel is
-           available
+        2. Glance (DISK_RAW): HVM
 
-        3. Glance (DISK): pv is assumed
+        3. Glance (DISK): PV
 
-        4. Glance (DISK_ISO): no pv is assumed
+        4. Glance (DISK_ISO): HVM
 
-        5. Boot From Volume - without image metadata (None): attempt to
-           use Pygrub to figure out if the volume stores a PV VM or a
-           HVM one. Log a warning, because there may be cases where the
-           volume is RAW (in which case using pygrub is fine) and cases
-           where the content of the volume is VHD, and pygrub might not
-           work as expected.
+        5. Boot From Volume - without image metadata (None): use HVM
            NOTE: if disk_image_type is not specified, instances launched
            from remote volumes will have to include kernel and ramdisk
            because external kernel and ramdisk will not be fetched.
@@ -1492,8 +1363,7 @@ def determine_is_pv(session, vdi_ref, disk_image_type, os_type):
             is_pv = True
     elif disk_image_type == ImageType.DISK_RAW:
         # 2. RAW
-        with vdi_attached_here(session, vdi_ref, read_only=True) as dev:
-            is_pv = _is_vdi_pv(dev)
+        is_pv = False
     elif disk_image_type == ImageType.DISK:
         # 3. Disk
         is_pv = True
@@ -1501,11 +1371,7 @@ def determine_is_pv(session, vdi_ref, disk_image_type, os_type):
         # 4. ISO
         is_pv = False
     elif not disk_image_type:
-        LOG.warning(_("Image format is None: trying to determine PV status "
-                      "using pygrub; if instance with vdi %s does not boot "
-                      "correctly, try with image metadata.") % vdi_ref)
-        with vdi_attached_here(session, vdi_ref, read_only=True) as dev:
-            is_pv = _is_vdi_pv(dev)
+        is_pv = False
     else:
         raise exception.NovaException(_("Unknown image format %s") %
                                       disk_image_type)
@@ -1618,7 +1484,7 @@ def compile_diagnostics(record):
         vm_uuid = record["uuid"]
         xml = _get_rrd(_get_rrd_server(), vm_uuid)
         if xml:
-            rrd = minidom.parseString(xml)
+            rrd = xmlutils.safe_minidom_parse_string(xml)
             for i, node in enumerate(rrd.firstChild.childNodes):
                 # Provide the last update of the information
                 if node.localName == 'lastupdate':
@@ -1697,12 +1563,14 @@ def _find_sr(session):
                     return sr_ref
     elif filter_criteria == 'default-sr' and filter_pattern == 'true':
         pool_ref = session.call_xenapi('pool.get_all')[0]
-        return session.call_xenapi('pool.get_default_SR', pool_ref)
+        sr_ref = session.call_xenapi('pool.get_default_SR', pool_ref)
+        if sr_ref:
+            return sr_ref
     # No SR found!
-    LOG.warning(_("XenAPI is unable to find a Storage Repository to "
-                  "install guest instances on. Please check your "
-                  "configuration and/or configure the flag "
-                  "'sr_matching_filter'"))
+    LOG.error(_("XenAPI is unable to find a Storage Repository to "
+                "install guest instances on. Please check your "
+                "configuration (e.g. set a default SR for the pool) "
+                "and/or configure the flag 'sr_matching_filter'."))
     return None
 
 
@@ -2016,27 +1884,6 @@ def get_this_vm_uuid():
 
 def _get_this_vm_ref(session):
     return session.call_xenapi("VM.get_by_uuid", get_this_vm_uuid())
-
-
-def _is_vdi_pv(dev):
-    LOG.debug(_("Running pygrub against %s"), dev)
-    dev_path = utils.make_dev_path(dev)
-    try:
-        out, err = utils.execute('pygrub', '-qn', dev_path, run_as_root=True)
-        for line in out:
-            # try to find kernel string
-            m = re.search('(?<=kernel:)/.*(?:>)', line)
-            if m and m.group(0).find('xen') != -1:
-                LOG.debug(_("Found Xen kernel %s") % m.group(0))
-                return True
-        LOG.debug(_("No Xen kernel found.  Booting HVM."))
-    except processutils.ProcessExecutionError:
-        LOG.exception(_("Error while executing pygrub! Please, ensure the "
-                        "binary is installed correctly, and available in your "
-                        "PATH; on some Linux distros, pygrub may be installed "
-                        "in /usr/lib/xen-X.Y/bin/pygrub. Attempting to boot "
-                        "in HVM mode."))
-    return False
 
 
 def _get_partitions(dev):

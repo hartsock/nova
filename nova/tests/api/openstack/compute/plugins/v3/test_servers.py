@@ -55,6 +55,7 @@ from nova.openstack.common import rpc
 from nova import policy
 from nova import test
 from nova.tests.api.openstack import fakes
+from nova.tests import fake_instance
 from nova.tests import fake_network
 from nova.tests.image import fake
 from nova.tests import matchers
@@ -221,6 +222,19 @@ class ServersControllerTest(ControllerTest):
         res = self.controller._get_requested_networks(requested_networks)
         self.assertEquals(res, [(None, None, port)])
 
+    def test_requested_networks_neutronv2_enabled_conflict_on_fixed_ip(self):
+        self.flags(network_api_class='nova.network.neutronv2.api.API')
+        network = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+        port = 'eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee'
+        addr = '10.0.0.1'
+        requested_networks = [{'uuid': network,
+                               'fixed_ip': addr,
+                               'port': port}]
+        self.assertRaises(
+            webob.exc.HTTPBadRequest,
+            self.controller._get_requested_networks,
+            requested_networks)
+
     def test_requested_networks_neutronv2_disabled_with_port(self):
         port = 'eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee'
         requested_networks = [{'port': port}]
@@ -252,7 +266,7 @@ class ServersControllerTest(ControllerTest):
 
     def test_unique_host_id(self):
         """Create two servers with the same host and different
-        project_ids and check that the hostId's are unique.
+        project_ids and check that the host_id's are unique.
         """
         def return_instance_with_host(self, *args, **kwargs):
             project_id = str(uuid.uuid4())
@@ -269,8 +283,8 @@ class ServersControllerTest(ControllerTest):
         server1 = self.controller.show(req, FAKE_UUID)
         server2 = self.controller.show(req, FAKE_UUID)
 
-        self.assertNotEqual(server1['server']['hostId'],
-                            server2['server']['hostId'])
+        self.assertNotEqual(server1['server']['host_id'],
+                            server2['server']['host_id'])
 
     def test_get_server_by_id(self):
         self.flags(use_ipv6=True)
@@ -291,9 +305,9 @@ class ServersControllerTest(ControllerTest):
                 "progress": 0,
                 "name": "server1",
                 "status": "BUILD",
-                "accessIPv4": "",
-                "accessIPv6": "",
-                "hostId": '',
+                "access_ip_v4": "",
+                "access_ip_v6": "",
+                "host_id": '',
                 "image": {
                     "id": "10",
                     "links": [
@@ -314,8 +328,10 @@ class ServersControllerTest(ControllerTest):
                 },
                 "addresses": {
                     'test1': [
-                        {'version': 4, 'addr': '192.168.1.100'},
-                        {'version': 6, 'addr': '2001:db8:0:1::1'}
+                        {'version': 4, 'addr': '192.168.1.100',
+                         'type': 'fixed', 'mac_addr': 'aa:aa:aa:aa:aa:aa'},
+                        {'version': 6, 'addr': '2001:db8:0:1::1',
+                         'type': 'fixed', 'mac_addr': 'aa:aa:aa:aa:aa:aa'}
                     ]
                 },
                 "metadata": {
@@ -357,9 +373,9 @@ class ServersControllerTest(ControllerTest):
                 "progress": 100,
                 "name": "server1",
                 "status": "ACTIVE",
-                "accessIPv4": "",
-                "accessIPv6": "",
-                "hostId": '',
+                "access_ip_v4": "",
+                "access_ip_v6": "",
+                "host_id": '',
                 "image": {
                     "id": "10",
                     "links": [
@@ -380,8 +396,10 @@ class ServersControllerTest(ControllerTest):
                 },
                 "addresses": {
                     'test1': [
-                        {'version': 4, 'addr': '192.168.1.100'},
-                        {'version': 6, 'addr': '2001:db8:0:1::1'}
+                        {'version': 4, 'addr': '192.168.1.100',
+                         'type': 'fixed', 'mac_addr': 'aa:aa:aa:aa:aa:aa'},
+                        {'version': 6, 'addr': '2001:db8:0:1::1',
+                         'type': 'fixed', 'mac_addr': 'aa:aa:aa:aa:aa:aa'},
                     ]
                 },
                 "metadata": {
@@ -426,9 +444,9 @@ class ServersControllerTest(ControllerTest):
                 "progress": 100,
                 "name": "server1",
                 "status": "ACTIVE",
-                "accessIPv4": "",
-                "accessIPv6": "",
-                "hostId": '',
+                "access_ip_v4": "",
+                "access_ip_v6": "",
+                "host_id": '',
                 "image": {
                     "id": "10",
                     "links": [
@@ -449,8 +467,10 @@ class ServersControllerTest(ControllerTest):
                 },
                 "addresses": {
                     'test1': [
-                        {'version': 4, 'addr': '192.168.1.100'},
-                        {'version': 6, 'addr': '2001:db8:0:1::1'}
+                        {'version': 4, 'addr': '192.168.1.100',
+                         'type': 'fixed', 'mac_addr': 'aa:aa:aa:aa:aa:aa'},
+                        {'version': 6, 'addr': '2001:db8:0:1::1',
+                         'type': 'fixed', 'mac_addr': 'aa:aa:aa:aa:aa:aa'},
                     ]
                 },
                 "metadata": {
@@ -509,14 +529,20 @@ class ServersControllerTest(ControllerTest):
         expected = {
             'addresses': {
                 'private': [
-                    {'version': 4, 'addr': '192.168.0.3'},
-                    {'version': 4, 'addr': '192.168.0.4'},
+                    {'version': 4, 'addr': '192.168.0.3',
+                     'type': 'fixed', 'mac_addr': 'bb:bb:bb:bb:bb:bb'},
+                    {'version': 4, 'addr': '192.168.0.4',
+                     'type': 'fixed', 'mac_addr': 'bb:bb:bb:bb:bb:bb'},
                 ],
                 'public': [
-                    {'version': 4, 'addr': '172.19.0.1'},
-                    {'version': 4, 'addr': '172.19.0.2'},
-                    {'version': 4, 'addr': '1.2.3.4'},
-                    {'version': 6, 'addr': 'b33f::fdee:ddff:fecc:bbaa'},
+                    {'version': 4, 'addr': '172.19.0.1',
+                     'type': 'fixed', 'mac_addr': 'aa:aa:aa:aa:aa:aa'},
+                    {'version': 4, 'addr': '172.19.0.2',
+                     'type': 'fixed', 'mac_addr': 'aa:aa:aa:aa:aa:aa'},
+                    {'version': 4, 'addr': '1.2.3.4',
+                     'type': 'fixed', 'mac_addr': 'aa:aa:aa:aa:aa:aa'},
+                    {'version': 6, 'addr': 'b33f::fdee:ddff:fecc:bbaa',
+                     'type': 'fixed', 'mac_addr': 'aa:aa:aa:aa:aa:aa'},
                 ],
             },
         }
@@ -934,10 +960,10 @@ class ServersControllerTest(ControllerTest):
                          sort_key=None, sort_dir='desc',
                          limit=None, marker=None, want_objects=False):
             self.assertNotEqual(search_opts, None)
-            self.assertTrue('changes-since' in search_opts)
+            self.assertTrue('changes_since' in search_opts)
             changes_since = datetime.datetime(2011, 1, 24, 17, 8, 1,
                                               tzinfo=iso8601.iso8601.UTC)
-            self.assertEqual(search_opts['changes-since'], changes_since)
+            self.assertEqual(search_opts['changes_since'], changes_since)
             self.assertTrue('deleted' not in search_opts)
             db_list = [fakes.stub_instance(100, uuid=server_uuid)]
             return instance_obj._make_instance_list(
@@ -945,7 +971,7 @@ class ServersControllerTest(ControllerTest):
 
         self.stubs.Set(compute_api.API, 'get_all', fake_get_all)
 
-        params = 'changes-since=2011-01-24T17:08:01Z'
+        params = 'changes_since=2011-01-24T17:08:01Z'
         req = fakes.HTTPRequestV3.blank('/servers?%s' % params)
         servers = self.controller.index(req)['servers']
 
@@ -953,7 +979,7 @@ class ServersControllerTest(ControllerTest):
         self.assertEqual(servers[0]['id'], server_uuid)
 
     def test_get_servers_allows_changes_since_bad_value(self):
-        params = 'changes-since=asdf'
+        params = 'changes_since=asdf'
         req = fakes.HTTPRequestV3.blank('/servers?%s' % params)
         self.assertRaises(webob.exc.HTTPBadRequest, self.controller.index, req)
 
@@ -1068,241 +1094,6 @@ class ServersControllerTest(ControllerTest):
         self.assertEqual(len(servers), 1)
         self.assertEqual(servers[0]['id'], server_uuid)
 
-    def test_update_server_all_attributes(self):
-        self.stubs.Set(db, 'instance_get',
-                fakes.fake_instance_get(name='server_test',
-                                        access_ipv4='0.0.0.0',
-                                        access_ipv6='beef::0123'))
-        req = fakes.HTTPRequestV3.blank('/servers/%s' % FAKE_UUID)
-        req.method = 'PUT'
-        req.content_type = 'application/json'
-        body = {'server': {
-                  'name': 'server_test',
-                  'accessIPv4': '0.0.0.0',
-                  'accessIPv6': 'beef::0123',
-               }}
-        req.body = jsonutils.dumps(body)
-        res_dict = self.controller.update(req, FAKE_UUID, body)
-
-        self.assertEqual(res_dict['server']['id'], FAKE_UUID)
-        self.assertEqual(res_dict['server']['name'], 'server_test')
-        self.assertEqual(res_dict['server']['accessIPv4'], '0.0.0.0')
-        self.assertEqual(res_dict['server']['accessIPv6'], 'beef::123')
-
-    def test_update_server_invalid_xml_raises_lookup(self):
-        req = fakes.HTTPRequestV3.blank('/servers/%s' % FAKE_UUID)
-        req.method = 'PUT'
-        req.content_type = 'application/xml'
-        #xml request which raises LookupError
-        req.body = """<?xml version="1.0" encoding="TF-8"?>
-            <metadata
-            xmlns="http://docs.openstack.org/compute/api/v1.1"
-            key="Label"></meta>"""
-        res = req.get_response(fakes.wsgi_app())
-        self.assertEqual(res.status_int, 400)
-
-    def test_update_server_invalid_xml_raises_expat(self):
-        req = fakes.HTTPRequestV3.blank('/servers/%s' % FAKE_UUID)
-        req.method = 'PUT'
-        req.content_type = 'application/xml'
-        #xml request which raises ExpatError
-        req.body = """<?xml version="1.0" encoding="UTF-8"?>
-            <metadata
-            xmlns="http://docs.openstack.org/compute/api/v1.1"
-            key="Label"></meta>"""
-        res = req.get_response(fakes.wsgi_app())
-        self.assertEqual(res.status_int, 400)
-
-    def test_update_server_name(self):
-        self.stubs.Set(db, 'instance_get',
-                fakes.fake_instance_get(name='server_test'))
-        req = fakes.HTTPRequestV3.blank('/servers/%s' % FAKE_UUID)
-        req.method = 'PUT'
-        req.content_type = 'application/json'
-        body = {'server': {'name': 'server_test'}}
-        req.body = jsonutils.dumps(body)
-        res_dict = self.controller.update(req, FAKE_UUID, body)
-
-        self.assertEqual(res_dict['server']['id'], FAKE_UUID)
-        self.assertEqual(res_dict['server']['name'], 'server_test')
-
-    def test_update_server_name_too_long(self):
-        self.stubs.Set(db, 'instance_get',
-                fakes.fake_instance_get(name='server_test'))
-        req = fakes.HTTPRequestV3.blank('/servers/%s' % FAKE_UUID)
-        req.method = 'PUT'
-        req.content_type = 'application/json'
-        body = {'server': {'name': 'x' * 256}}
-        req.body = jsonutils.dumps(body)
-        self.assertRaises(webob.exc.HTTPBadRequest, self.controller.update,
-                            req, FAKE_UUID, body)
-
-    def test_update_server_access_ipv4(self):
-        self.stubs.Set(db, 'instance_get',
-                fakes.fake_instance_get(access_ipv4='0.0.0.0'))
-        req = fakes.HTTPRequestV3.blank('/servers/%s' % FAKE_UUID)
-        req.method = 'PUT'
-        req.content_type = 'application/json'
-        body = {'server': {'accessIPv4': '0.0.0.0'}}
-        req.body = jsonutils.dumps(body)
-        res_dict = self.controller.update(req, FAKE_UUID, body)
-
-        self.assertEqual(res_dict['server']['id'], FAKE_UUID)
-        self.assertEqual(res_dict['server']['accessIPv4'], '0.0.0.0')
-
-    def test_update_server_access_ipv4_bad_format(self):
-        self.stubs.Set(db, 'instance_get',
-                fakes.fake_instance_get(access_ipv4='0.0.0.0'))
-        req = fakes.HTTPRequestV3.blank('/servers/%s' % FAKE_UUID)
-        req.method = 'PUT'
-        req.content_type = 'application/json'
-        body = {'server': {'accessIPv4': 'bad_format'}}
-        req.body = jsonutils.dumps(body)
-        self.assertRaises(webob.exc.HTTPBadRequest, self.controller.update,
-                            req, FAKE_UUID, body)
-
-    def test_update_server_access_ipv4_none(self):
-        self.stubs.Set(db, 'instance_get',
-                fakes.fake_instance_get(access_ipv4='0.0.0.0'))
-        req = fakes.HTTPRequestV3.blank('/servers/%s' % FAKE_UUID)
-        req.method = 'PUT'
-        req.content_type = 'application/json'
-        body = {'server': {'accessIPv4': None}}
-        req.body = jsonutils.dumps(body)
-        res_dict = self.controller.update(req, FAKE_UUID, body)
-
-        self.assertEqual(res_dict['server']['id'], FAKE_UUID)
-        self.assertEqual(res_dict['server']['accessIPv4'], '')
-
-    def test_update_server_access_ipv4_blank(self):
-        self.stubs.Set(db, 'instance_get',
-                fakes.fake_instance_get(access_ipv4='0.0.0.0'))
-        req = fakes.HTTPRequestV3.blank('/servers/%s' % FAKE_UUID)
-        req.method = 'PUT'
-        req.content_type = 'application/json'
-        body = {'server': {'accessIPv4': ''}}
-        req.body = jsonutils.dumps(body)
-        res_dict = self.controller.update(req, FAKE_UUID, body)
-
-        self.assertEqual(res_dict['server']['id'], FAKE_UUID)
-        self.assertEqual(res_dict['server']['accessIPv4'], '')
-
-    def test_update_server_access_ipv6(self):
-        self.stubs.Set(db, 'instance_get',
-                fakes.fake_instance_get(access_ipv6='beef::0123'))
-        req = fakes.HTTPRequestV3.blank('/servers/%s' % FAKE_UUID)
-        req.method = 'PUT'
-        req.content_type = 'application/json'
-        body = {'server': {'accessIPv6': 'beef::0123'}}
-        req.body = jsonutils.dumps(body)
-        res_dict = self.controller.update(req, FAKE_UUID, body)
-
-        self.assertEqual(res_dict['server']['id'], FAKE_UUID)
-        self.assertEqual(res_dict['server']['accessIPv6'], 'beef::123')
-
-    def test_update_server_access_ipv6_bad_format(self):
-        self.stubs.Set(db, 'instance_get',
-                fakes.fake_instance_get(access_ipv6='beef::0123'))
-        req = fakes.HTTPRequestV3.blank('/servers/%s' % FAKE_UUID)
-        req.method = 'PUT'
-        req.content_type = 'application/json'
-        body = {'server': {'accessIPv6': 'bad_format'}}
-        req.body = jsonutils.dumps(body)
-        self.assertRaises(webob.exc.HTTPBadRequest, self.controller.update,
-                            req, FAKE_UUID, body)
-
-    def test_update_server_access_ipv6_none(self):
-        self.stubs.Set(db, 'instance_get',
-                fakes.fake_instance_get(access_ipv6='beef::0123'))
-        req = fakes.HTTPRequestV3.blank('/servers/%s' % FAKE_UUID)
-        req.method = 'PUT'
-        req.content_type = 'application/json'
-        body = {'server': {'accessIPv6': None}}
-        req.body = jsonutils.dumps(body)
-        res_dict = self.controller.update(req, FAKE_UUID, body)
-
-        self.assertEqual(res_dict['server']['id'], FAKE_UUID)
-        self.assertEqual(res_dict['server']['accessIPv6'], '')
-
-    def test_update_server_access_ipv6_blank(self):
-        self.stubs.Set(db, 'instance_get',
-                fakes.fake_instance_get(access_ipv6='beef::0123'))
-        req = fakes.HTTPRequestV3.blank('/servers/%s' % FAKE_UUID)
-        req.method = 'PUT'
-        req.content_type = 'application/json'
-        body = {'server': {'accessIPv6': ''}}
-        req.body = jsonutils.dumps(body)
-        res_dict = self.controller.update(req, FAKE_UUID, body)
-
-        self.assertEqual(res_dict['server']['id'], FAKE_UUID)
-        self.assertEqual(res_dict['server']['accessIPv6'], '')
-
-    def test_update_server_personality(self):
-        req = fakes.HTTPRequestV3.blank('/servers/%s' % FAKE_UUID)
-        req.method = 'PUT'
-        req.content_type = 'application/json'
-        body = {
-            'server': {
-                'personality': []
-            }
-        }
-        req.body = jsonutils.dumps(body)
-
-        self.assertRaises(webob.exc.HTTPBadRequest,
-            self.controller.update, req, FAKE_UUID, body)
-
-    def test_update_server_adminPass_ignored(self):
-        inst_dict = dict(name='server_test', adminPass='bacon')
-        body = dict(server=inst_dict)
-
-        def server_update(context, id, params):
-            filtered_dict = {
-                'display_name': 'server_test',
-            }
-            self.assertEqual(params, filtered_dict)
-            filtered_dict['uuid'] = id
-            return filtered_dict
-
-        self.stubs.Set(db, 'instance_update', server_update)
-        # FIXME (comstud)
-        #        self.stubs.Set(db, 'instance_get',
-        #                return_server_with_attributes(name='server_test'))
-
-        req = fakes.HTTPRequestV3.blank('/servers/%s' % FAKE_UUID)
-        req.method = 'PUT'
-        req.content_type = "application/json"
-        req.body = jsonutils.dumps(body)
-        res_dict = self.controller.update(req, FAKE_UUID, body)
-
-        self.assertEqual(res_dict['server']['id'], FAKE_UUID)
-        self.assertEqual(res_dict['server']['name'], 'server_test')
-
-    def test_update_server_not_found(self):
-        def fake_get(*args, **kwargs):
-            raise exception.InstanceNotFound(instance_id='fake')
-
-        self.stubs.Set(compute_api.API, 'get', fake_get)
-        req = fakes.HTTPRequestV3.blank('/servers/%s' % FAKE_UUID)
-        req.method = 'PUT'
-        req.content_type = 'application/json'
-        body = {'server': {'name': 'server_test'}}
-        req.body = jsonutils.dumps(body)
-        self.assertRaises(webob.exc.HTTPNotFound, self.controller.update,
-                          req, FAKE_UUID, body)
-
-    def test_update_server_not_found_on_update(self):
-        def fake_update(*args, **kwargs):
-            raise exception.InstanceNotFound(instance_id='fake')
-
-        self.stubs.Set(db, 'instance_update_and_get_original', fake_update)
-        req = fakes.HTTPRequestV3.blank('/servers/%s' % FAKE_UUID)
-        req.method = 'PUT'
-        req.content_type = 'application/json'
-        body = {'server': {'name': 'server_test'}}
-        req.body = jsonutils.dumps(body)
-        self.assertRaises(webob.exc.HTTPNotFound, self.controller.update,
-                          req, FAKE_UUID, body)
-
     def test_get_all_server_details(self):
         expected_flavor = {
                 "id": "1",
@@ -1327,7 +1118,7 @@ class ServersControllerTest(ControllerTest):
 
         for i, s in enumerate(res_dict['servers']):
             self.assertEqual(s['id'], fakes.get_fake_uuid(i))
-            self.assertEqual(s['hostId'], '')
+            self.assertEqual(s['host_id'], '')
             self.assertEqual(s['name'], 'server%d' % (i + 1))
             self.assertEqual(s['image'], expected_image)
             self.assertEqual(s['flavor'], expected_flavor)
@@ -1337,8 +1128,8 @@ class ServersControllerTest(ControllerTest):
     def test_get_all_server_details_with_host(self):
         '''
         We want to make sure that if two instances are on the same host, then
-        they return the same hostId. If two instances are on different hosts,
-        they should return different hostIds. In this test, there are 5
+        they return the same host_id. If two instances are on different hosts,
+        they should return different host_ids. In this test, there are 5
         instances - 2 on one host and 3 on another.
         '''
 
@@ -1354,13 +1145,13 @@ class ServersControllerTest(ControllerTest):
         res_dict = self.controller.detail(req)
 
         server_list = res_dict['servers']
-        host_ids = [server_list[0]['hostId'], server_list[1]['hostId']]
+        host_ids = [server_list[0]['host_id'], server_list[1]['host_id']]
         self.assertTrue(host_ids[0] and host_ids[1])
         self.assertNotEqual(host_ids[0], host_ids[1])
 
         for i, s in enumerate(server_list):
             self.assertEqual(s['id'], fakes.get_fake_uuid(i))
-            self.assertEqual(s['hostId'], host_ids[i % 2])
+            self.assertEqual(s['host_id'], host_ids[i % 2])
             self.assertEqual(s['name'], 'server%d' % (i + 1))
 
     def _delete_server_instance(self, uuid=FAKE_UUID):
@@ -1435,7 +1226,7 @@ class ServersControllerRebuildInstanceTest(ControllerTest):
         self.body = {
             'rebuild': {
                 'name': 'new_name',
-                'imageRef': self.image_href,
+                'image_ref': self.image_href,
                 'metadata': {
                     'open': 'stack',
                 },
@@ -1453,8 +1244,8 @@ class ServersControllerRebuildInstanceTest(ControllerTest):
 
     def test_rebuild_instance_with_access_ipv4_bad_format(self):
         # proper local hrefs must start with 'http://localhost/v2/'
-        self.body['rebuild']['accessIPv4'] = 'bad_format'
-        self.body['rebuild']['accessIPv6'] = 'fead::1234'
+        self.body['rebuild']['access_ip_v4'] = 'bad_format'
+        self.body['rebuild']['access_ip_v6'] = 'fead::1234'
         self.body['rebuild']['metadata']['hello'] = 'world'
         self.req.body = jsonutils.dumps(self.body)
         self.assertRaises(webob.exc.HTTPBadRequest,
@@ -1462,8 +1253,8 @@ class ServersControllerRebuildInstanceTest(ControllerTest):
                           self.req, FAKE_UUID, self.body)
 
     def test_rebuild_instance_with_blank_metadata_key(self):
-        self.body['rebuild']['accessIPv4'] = '0.0.0.0'
-        self.body['rebuild']['accessIPv6'] = 'fead::1234'
+        self.body['rebuild']['access_ip_v4'] = '0.0.0.0'
+        self.body['rebuild']['access_ip_v6'] = 'fead::1234'
         self.body['rebuild']['metadata'][''] = 'world'
         self.req.body = jsonutils.dumps(self.body)
         self.assertRaises(webob.exc.HTTPBadRequest,
@@ -1471,8 +1262,8 @@ class ServersControllerRebuildInstanceTest(ControllerTest):
                           self.req, FAKE_UUID, self.body)
 
     def test_rebuild_instance_with_metadata_key_too_long(self):
-        self.body['rebuild']['accessIPv4'] = '0.0.0.0'
-        self.body['rebuild']['accessIPv6'] = 'fead::1234'
+        self.body['rebuild']['access_ip_v4'] = '0.0.0.0'
+        self.body['rebuild']['access_ip_v6'] = 'fead::1234'
         self.body['rebuild']['metadata'][('a' * 260)] = 'world'
 
         self.req.body = jsonutils.dumps(self.body)
@@ -1481,8 +1272,8 @@ class ServersControllerRebuildInstanceTest(ControllerTest):
                           self.req, FAKE_UUID, self.body)
 
     def test_rebuild_instance_with_metadata_value_too_long(self):
-        self.body['rebuild']['accessIPv4'] = '0.0.0.0'
-        self.body['rebuild']['accessIPv6'] = 'fead::1234'
+        self.body['rebuild']['access_ip_v4'] = '0.0.0.0'
+        self.body['rebuild']['access_ip_v6'] = 'fead::1234'
         self.body['rebuild']['metadata']['key1'] = ('a' * 260)
 
         self.req.body = jsonutils.dumps(self.body)
@@ -1548,8 +1339,8 @@ class ServersControllerRebuildInstanceTest(ControllerTest):
                           self.req, FAKE_UUID, self.body)
 
     def test_rebuild_instance_with_access_ipv6_bad_format(self):
-        self.body['rebuild']['accessIPv4'] = '1.2.3.4'
-        self.body['rebuild']['accessIPv6'] = 'bad_format'
+        self.body['rebuild']['access_ip_v4'] = '1.2.3.4'
+        self.body['rebuild']['access_ip_v6'] = 'bad_format'
         self.body['rebuild']['metadata']['hello'] = 'world'
         self.req.body = jsonutils.dumps(self.body)
         self.req.headers["content-type"] = "application/json"
@@ -1604,6 +1395,195 @@ class ServersControllerRebuildInstanceTest(ControllerTest):
         body = dict(start="")
         self.assertRaises(webob.exc.HTTPNotFound,
             self.controller._stop_server, req, 'test_inst', body)
+
+
+class ServersControllerUpdateTest(ControllerTest):
+
+    def _get_request(self, body=None, options=None):
+        if options:
+            self.stubs.Set(db, 'instance_get',
+                           fakes.fake_instance_get(**options))
+        req = fakes.HTTPRequestV3.blank('/servers/%s' % FAKE_UUID)
+        req.method = 'PUT'
+        req.content_type = 'application/json'
+        req.body = jsonutils.dumps(body)
+        return req
+
+    def test_update_server_all_attributes(self):
+        body = {'server': {
+                  'name': 'server_test',
+                  'access_ip_v4': '0.0.0.0',
+                  'access_ip_v6': 'beef::0123',
+               }}
+        req = self._get_request(body, {'name': 'server_test',
+                                       'access_ipv4': '0.0.0.0',
+                                       'access_ipv6': 'beef::0123'})
+        res_dict = self.controller.update(req, FAKE_UUID, body)
+
+        self.assertEqual(res_dict['server']['id'], FAKE_UUID)
+        self.assertEqual(res_dict['server']['name'], 'server_test')
+        self.assertEqual(res_dict['server']['access_ip_v4'], '0.0.0.0')
+        self.assertEqual(res_dict['server']['access_ip_v6'], 'beef::123')
+
+    def test_update_server_invalid_xml_raises_lookup(self):
+        req = webob.Request.blank('/v3/servers/%s' % FAKE_UUID)
+        req.method = 'PUT'
+        req.content_type = 'application/xml'
+        #xml request which raises LookupError
+        req.body = """<?xml version="1.0" encoding="TF-8"?>
+            <metadata
+            xmlns="http://docs.openstack.org/compute/api/v1.1"
+            key="Label"></metadata>"""
+        res = req.get_response(fakes.wsgi_app_v3())
+        self.assertEqual(res.status_int, 400)
+        res_dict = jsonutils.loads(res.body)
+        self.assertEqual(res_dict['badRequest']['message'],
+                         "Malformed request body")
+
+    def test_update_server_invalid_xml_raises_expat(self):
+        req = webob.Request.blank('/v3/servers/%s' % FAKE_UUID)
+        req.method = 'PUT'
+        req.content_type = 'application/xml'
+        #xml request which raises ExpatError
+        req.body = """<?xml version="1.0" encoding="UTF-8"?>
+            <metadata
+            xmlns="http://docs.openstack.org/compute/api/v1.1"
+            key="Label"></meta>"""
+        res = req.get_response(fakes.wsgi_app_v3())
+        self.assertEqual(res.status_int, 400)
+        res_dict = jsonutils.loads(res.body)
+        self.assertEqual(res_dict['badRequest']['message'],
+                         "Malformed request body")
+
+    def test_update_server_name(self):
+        body = {'server': {'name': 'server_test'}}
+        req = self._get_request(body, {'name': 'server_test'})
+        res_dict = self.controller.update(req, FAKE_UUID, body)
+
+        self.assertEqual(res_dict['server']['id'], FAKE_UUID)
+        self.assertEqual(res_dict['server']['name'], 'server_test')
+
+    def test_update_server_name_too_long(self):
+        body = {'server': {'name': 'x' * 256}}
+        req = self._get_request(body, {'name': 'server_test'})
+        self.assertRaises(webob.exc.HTTPBadRequest, self.controller.update,
+                            req, FAKE_UUID, body)
+
+    def test_update_server_access_ipv4(self):
+        body = {'server': {'access_ip_v4': '0.0.0.0'}}
+        req = self._get_request(body, {'access_ipv4': '0.0.0.0'})
+        res_dict = self.controller.update(req, FAKE_UUID, body)
+
+        self.assertEqual(res_dict['server']['id'], FAKE_UUID)
+        self.assertEqual(res_dict['server']['access_ip_v4'], '0.0.0.0')
+
+    def test_update_server_access_ipv4_bad_format(self):
+        body = {'server': {'access_ip_v4': 'bad_format'}}
+        req = self._get_request(body, {'access_ipv4': '0.0.0.0'})
+        self.assertRaises(webob.exc.HTTPBadRequest, self.controller.update,
+                          req, FAKE_UUID, body)
+
+    def test_update_server_access_ipv4_none(self):
+        body = {'server': {'access_ip_v4': None}}
+        req = self._get_request(body, {'access_ipv4': '0.0.0.0'})
+        res_dict = self.controller.update(req, FAKE_UUID, body)
+
+        self.assertEqual(res_dict['server']['id'], FAKE_UUID)
+        self.assertEqual(res_dict['server']['access_ip_v4'], '')
+
+    def test_update_server_access_ipv4_blank(self):
+        body = {'server': {'access_ip_v4': ''}}
+        req = self._get_request(body, {'access_ipv4': '0.0.0.0'})
+        res_dict = self.controller.update(req, FAKE_UUID, body)
+
+        self.assertEqual(res_dict['server']['id'], FAKE_UUID)
+        self.assertEqual(res_dict['server']['access_ip_v4'], '')
+
+    def test_update_server_access_ipv6(self):
+        body = {'server': {'access_ip_v6': 'beef::0123'}}
+        req = self._get_request(body, {'access_ipv6': 'beef::0123'})
+        res_dict = self.controller.update(req, FAKE_UUID, body)
+
+        self.assertEqual(res_dict['server']['id'], FAKE_UUID)
+        self.assertEqual(res_dict['server']['access_ip_v6'], 'beef::123')
+
+    def test_update_server_access_ipv6_bad_format(self):
+        body = {'server': {'access_ip_v6': 'bad_format'}}
+        req = self._get_request(body, {'access_ipv6': 'beef::0123'})
+        self.assertRaises(webob.exc.HTTPBadRequest, self.controller.update,
+                          req, FAKE_UUID, body)
+
+    def test_update_server_access_ipv6_none(self):
+        body = {'server': {'access_ip_v6': None}}
+        req = self._get_request(body, {'access_ipv6': 'beef::0123'})
+        res_dict = self.controller.update(req, FAKE_UUID, body)
+
+        self.assertEqual(res_dict['server']['id'], FAKE_UUID)
+        self.assertEqual(res_dict['server']['access_ip_v6'], '')
+
+    def test_update_server_access_ipv6_blank(self):
+        body = {'server': {'access_ip_v6': ''}}
+        req = self._get_request(body, {'access_ipv6': 'beef::0123'})
+        res_dict = self.controller.update(req, FAKE_UUID, body)
+
+        self.assertEqual(res_dict['server']['id'], FAKE_UUID)
+        self.assertEqual(res_dict['server']['access_ip_v6'], '')
+
+    def test_update_server_personality(self):
+        body = {
+            'server': {
+                'personality': []
+            }
+        }
+        req = self._get_request(body)
+        self.assertRaises(webob.exc.HTTPBadRequest,
+            self.controller.update, req, FAKE_UUID, body)
+
+    def test_update_server_adminPass_ignored(self):
+        inst_dict = dict(name='server_test', adminPass='bacon')
+        body = dict(server=inst_dict)
+
+        def server_update(context, id, params):
+            filtered_dict = {
+                'display_name': 'server_test',
+            }
+            self.assertEqual(params, filtered_dict)
+            filtered_dict['uuid'] = id
+            return filtered_dict
+
+        self.stubs.Set(db, 'instance_update', server_update)
+        # FIXME (comstud)
+        #        self.stubs.Set(db, 'instance_get',
+        #                return_server_with_attributes(name='server_test'))
+
+        req = fakes.HTTPRequest.blank('/fake/servers/%s' % FAKE_UUID)
+        req.method = 'PUT'
+        req.content_type = "application/json"
+        req.body = jsonutils.dumps(body)
+        res_dict = self.controller.update(req, FAKE_UUID, body)
+
+        self.assertEqual(res_dict['server']['id'], FAKE_UUID)
+        self.assertEqual(res_dict['server']['name'], 'server_test')
+
+    def test_update_server_not_found(self):
+        def fake_get(*args, **kwargs):
+            raise exception.InstanceNotFound(instance_id='fake')
+
+        self.stubs.Set(compute_api.API, 'get', fake_get)
+        body = {'server': {'name': 'server_test'}}
+        req = self._get_request(body)
+        self.assertRaises(webob.exc.HTTPNotFound, self.controller.update,
+                          req, FAKE_UUID, body)
+
+    def test_update_server_not_found_on_update(self):
+        def fake_update(*args, **kwargs):
+            raise exception.InstanceNotFound(instance_id='fake')
+
+        self.stubs.Set(db, 'instance_update_and_get_original', fake_update)
+        body = {'server': {'name': 'server_test'}}
+        req = self._get_request(body)
+        self.assertRaises(webob.exc.HTTPNotFound, self.controller.update,
+                          req, FAKE_UUID, body)
 
 
 class ServerStatusTest(test.TestCase):
@@ -1732,7 +1712,7 @@ class ServersControllerCreateTest(test.TestCase):
             image_uuid = '76fa36fc-c930-4bf3-8c8a-ea2a2420deb6'
             def_image_ref = 'http://localhost/images/%s' % image_uuid
             self.instance_cache_num += 1
-            instance = {
+            instance = fake_instance.fake_db_instance(**{
                 'id': self.instance_cache_num,
                 'display_name': inst['display_name'] or 'test',
                 'uuid': FAKE_UUID,
@@ -1750,7 +1730,8 @@ class ServersControllerCreateTest(test.TestCase):
                 "fixed_ips": [],
                 "task_state": "",
                 "vm_state": "",
-            }
+                "security_groups": inst['security_groups'],
+            })
 
             self.instance_cache_by_id[instance['id']] = instance
             self.instance_cache_by_uuid[instance['uuid']] = instance
@@ -1818,8 +1799,8 @@ class ServersControllerCreateTest(test.TestCase):
             'server': {
                 'min_count': 2,
                 'name': 'server_test',
-                'imageRef': self.image_uuid,
-                'flavorRef': self.flavor_ref,
+                'image_ref': self.image_uuid,
+                'flavor_ref': self.flavor_ref,
                 'metadata': {
                     'hello': 'world',
                     'open': 'stack',
@@ -1842,18 +1823,18 @@ class ServersControllerCreateTest(test.TestCase):
         self.req.headers["content-type"] = "application/json"
 
     def _check_admin_pass_len(self, server_dict):
-        """utility function - check server_dict for adminPass length."""
+        """utility function - check server_dict for admin_pass length."""
         self.assertEqual(CONF.password_length,
-                         len(server_dict["adminPass"]))
+                         len(server_dict["admin_pass"]))
 
     def _check_admin_pass_missing(self, server_dict):
-        """utility function - check server_dict for absence of adminPass."""
-        self.assertTrue("adminPass" not in server_dict)
+        """utility function - check server_dict for absence of admin_pass."""
+        self.assertTrue("admin_pass" not in server_dict)
 
     def _test_create_instance(self):
         image_uuid = 'c905cedb-7281-47e4-8a62-f26bc5fc4c77'
-        self.body['server']['imageRef'] = image_uuid
-        self.body['server']['flavorRef'] = 2
+        self.body['server']['image_ref'] = image_uuid
+        self.body['server']['flavor_ref'] = 2
         self.req.body = jsonutils.dumps(self.body)
         server = self.controller.create(self.req, self.body).obj['server']
         self._check_admin_pass_len(server)
@@ -1862,7 +1843,7 @@ class ServersControllerCreateTest(test.TestCase):
     def test_create_server_bad_image_href(self):
         image_href = 1
         self.body['server']['min_count'] = 1
-        self.body['server']['imageRef'] = image_href,
+        self.body['server']['image_ref'] = image_href,
         self.req.body = jsonutils.dumps(self.body)
         self.assertRaises(webob.exc.HTTPBadRequest,
                           self.controller.create,
@@ -1898,7 +1879,7 @@ class ServersControllerCreateTest(test.TestCase):
         self.addCleanup(image_service.update, context, self.image_uuid,
                         {'status': 'active'})
 
-        self.body['server']['flavorRef'] = 2
+        self.body['server']['flavor_ref'] = 2
         self.req.body = jsonutils.dumps(self.body)
         with testtools.ExpectedException(
                 webob.exc.HTTPBadRequest,
@@ -1919,7 +1900,7 @@ class ServersControllerCreateTest(test.TestCase):
         self.addCleanup(image_service.update, context, self.image_uuid,
                         {'size': orig_size})
 
-        self.body['server']['flavorRef'] = 2
+        self.body['server']['flavor_ref'] = 2
         self.req.body = jsonutils.dumps(self.body)
 
         with testtools.ExpectedException(
@@ -2222,7 +2203,7 @@ class ServersControllerCreateTest(test.TestCase):
 
     def test_create_instance_image_ref_is_bookmark(self):
         image_href = 'http://localhost/images/%s' % self.image_uuid
-        self.body['server']['imageRef'] = image_href
+        self.body['server']['image_ref'] = image_href
         self.req.body = jsonutils.dumps(self.body)
         res = self.controller.create(self.req, self.body).obj
 
@@ -2233,8 +2214,8 @@ class ServersControllerCreateTest(test.TestCase):
         image_uuid = 'this_is_not_a_valid_uuid'
         image_href = 'http://localhost/images/%s' % image_uuid
         flavor_ref = 'http://localhost/flavors/3'
-        self.body['server']['imageRef'] = image_href
-        self.body['server']['flavorRef'] = flavor_ref
+        self.body['server']['image_ref'] = image_href
+        self.body['server']['flavor_ref'] = flavor_ref
         self.req.body = jsonutils.dumps(self.body)
         self.assertRaises(webob.exc.HTTPBadRequest, self.controller.create,
                           self.req, self.body)
@@ -2244,9 +2225,9 @@ class ServersControllerCreateTest(test.TestCase):
         self._test_create_instance()
 
     def _test_create_extra(self, params, no_image=False):
-        self.body['server']['flavorRef'] = 2
+        self.body['server']['flavor_ref'] = 2
         if no_image:
-            self.body['server'].pop('imageRef', None)
+            self.body['server'].pop('image_ref', None)
         self.body['server'].update(params)
         self.req.body = jsonutils.dumps(self.body)
         self.req.headers["content-type"] = "application/json"
@@ -2601,9 +2582,9 @@ class ServersControllerCreateTest(test.TestCase):
     def test_create_instance_with_access_ip(self):
         # proper local hrefs must start with 'http://localhost/v3/'
         image_href = 'http://localhost/v2/fake/images/%s' % self.image_uuid
-        self.body['server']['imageRef'] = image_href
-        self.body['server']['accessIPv4'] = '1.2.3.4'
-        self.body['server']['accessIPv6'] = 'fead::1234'
+        self.body['server']['image_ref'] = image_href
+        self.body['server']['access_ip_v4'] = '1.2.3.4'
+        self.body['server']['access_ip_v6'] = 'fead::1234'
 
         self.req.body = jsonutils.dumps(self.body)
         res = self.controller.create(self.req, self.body).obj
@@ -2618,9 +2599,9 @@ class ServersControllerCreateTest(test.TestCase):
         # proper local hrefs must start with 'http://localhost/v3/'
         self.flags(enable_instance_password=False)
         image_href = 'http://localhost/v2/fake/images/%s' % self.image_uuid
-        self.body['server']['imageRef'] = image_href
-        self.body['server']['accessIPv4'] = '1.2.3.4'
-        self.body['server']['accessIPv6'] = 'fead::1234'
+        self.body['server']['image_ref'] = image_href
+        self.body['server']['access_ip_v4'] = '1.2.3.4'
+        self.body['server']['access_ip_v6'] = 'fead::1234'
         self.req.body = jsonutils.dumps(self.body)
         res = self.controller.create(self.req, self.body).obj
 
@@ -2631,9 +2612,9 @@ class ServersControllerCreateTest(test.TestCase):
     def test_create_instance_bad_format_access_ip_v4(self):
         # proper local hrefs must start with 'http://localhost/v3/'
         image_href = 'http://localhost/v2/fake/images/%s' % self.image_uuid
-        self.body['server']['imageRef'] = image_href
-        self.body['server']['accessIPv4'] = 'bad_format'
-        self.body['server']['accessIPv6'] = 'fead::1234'
+        self.body['server']['image_ref'] = image_href
+        self.body['server']['access_ip_v4'] = 'bad_format'
+        self.body['server']['access_ip_v6'] = 'fead::1234'
         self.req.body = jsonutils.dumps(self.body)
         self.assertRaises(webob.exc.HTTPBadRequest, self.controller.create,
                           self.req, self.body)
@@ -2641,9 +2622,9 @@ class ServersControllerCreateTest(test.TestCase):
     def test_create_instance_bad_format_access_ip_v6(self):
         # proper local hrefs must start with 'http://localhost/v3/'
         image_href = 'http://localhost/v2/fake/images/%s' % self.image_uuid
-        self.body['server']['imageRef'] = image_href
-        self.body['server']['accessIPv4'] = '1.2.3.4'
-        self.body['server']['accessIPv6'] = 'bad_format'
+        self.body['server']['image_ref'] = image_href
+        self.body['server']['access_ip_v4'] = '1.2.3.4'
+        self.body['server']['access_ip_v6'] = 'bad_format'
         self.req.body = jsonutils.dumps(self.body)
         self.assertRaises(webob.exc.HTTPBadRequest, self.controller.create,
                           self.req, self.body)
@@ -2652,7 +2633,7 @@ class ServersControllerCreateTest(test.TestCase):
         # proper local hrefs must start with 'http://localhost/v3/'
         image_href = 'http://localhost/v2/images/%s' % self.image_uuid
         self.body['server']['name'] = 'X' * 256
-        self.body['server']['imageRef'] = image_href
+        self.body['server']['image_ref'] = image_href
         self.req.body = jsonutils.dumps(self.body)
         self.assertRaises(webob.exc.HTTPBadRequest, self.controller.create,
                           self.req, self.body)
@@ -2660,7 +2641,7 @@ class ServersControllerCreateTest(test.TestCase):
     def test_create_instance(self):
         # proper local hrefs must start with 'http://localhost/v3/'
         image_href = 'http://localhost/v2/images/%s' % self.image_uuid
-        self.body['server']['imageRef'] = image_href
+        self.body['server']['image_ref'] = image_href
         self.req.body = jsonutils.dumps(self.body)
         res = self.controller.create(self.req, self.body).obj
 
@@ -2682,8 +2663,8 @@ class ServersControllerCreateTest(test.TestCase):
         body = {
             'server': {
                 'name': 'server_test',
-                'imageRef': image_href,
-                'flavorRef': flavor_ref,
+                'image_ref': image_href,
+                'flavor_ref': flavor_ref,
                 'metadata': {
                     'hello': 'world',
                     'open': 'stack',
@@ -2708,7 +2689,7 @@ class ServersControllerCreateTest(test.TestCase):
         self.flags(enable_instance_password=False)
         # proper local hrefs must start with 'http://localhost/v3/'
         image_href = 'http://localhost/v2/images/%s' % self.image_uuid
-        self.body['server']['imageRef'] = image_href
+        self.body['server']['image_ref'] = image_href
         self.req.body = jsonutils.dumps(self.body)
         res = self.controller.create(self.req, self.body).obj
 
@@ -2719,7 +2700,7 @@ class ServersControllerCreateTest(test.TestCase):
     def test_create_instance_too_much_metadata(self):
         self.flags(quota_metadata_items=1)
         image_href = 'http://localhost/v2/images/%s' % self.image_uuid
-        self.body['server']['imageRef'] = image_href
+        self.body['server']['image_ref'] = image_href
         self.body['server']['metadata']['vote'] = 'fiddletown'
         self.req.body = jsonutils.dumps(self.body)
         self.assertRaises(webob.exc.HTTPRequestEntityTooLarge,
@@ -2728,7 +2709,7 @@ class ServersControllerCreateTest(test.TestCase):
     def test_create_instance_metadata_key_too_long(self):
         self.flags(quota_metadata_items=1)
         image_href = 'http://localhost/v2/images/%s' % self.image_uuid
-        self.body['server']['imageRef'] = image_href
+        self.body['server']['image_ref'] = image_href
         self.body['server']['metadata'] = {('a' * 260): '12345'}
 
         self.req.body = jsonutils.dumps(self.body)
@@ -2738,7 +2719,7 @@ class ServersControllerCreateTest(test.TestCase):
     def test_create_instance_metadata_value_too_long(self):
         self.flags(quota_metadata_items=1)
         image_href = 'http://localhost/v2/images/%s' % self.image_uuid
-        self.body['server']['imageRef'] = image_href
+        self.body['server']['image_ref'] = image_href
         self.body['server']['metadata'] = {'key1': ('a' * 260)}
         self.req.body = jsonutils.dumps(self.body)
         self.assertRaises(webob.exc.HTTPRequestEntityTooLarge,
@@ -2747,7 +2728,7 @@ class ServersControllerCreateTest(test.TestCase):
     def test_create_instance_metadata_key_blank(self):
         self.flags(quota_metadata_items=1)
         image_href = 'http://localhost/v2/images/%s' % self.image_uuid
-        self.body['server']['imageRef'] = image_href
+        self.body['server']['image_ref'] = image_href
         self.body['server']['metadata'] = {'': 'abcd'}
         self.req.body = jsonutils.dumps(self.body)
         self.assertRaises(webob.exc.HTTPBadRequest,
@@ -2755,7 +2736,7 @@ class ServersControllerCreateTest(test.TestCase):
 
     def test_create_instance_invalid_key_name(self):
         image_href = 'http://localhost/v2/images/2'
-        self.body['server']['imageRef'] = image_href
+        self.body['server']['image_ref'] = image_href
         self.body['server']['key_name'] = 'nonexistentkey'
         self.req.body = jsonutils.dumps(self.body)
         self.assertRaises(webob.exc.HTTPBadRequest,
@@ -2772,8 +2753,8 @@ class ServersControllerCreateTest(test.TestCase):
     def test_create_instance_invalid_flavor_href(self):
         image_href = 'http://localhost/v2/images/2'
         flavor_ref = 'http://localhost/v2/flavors/asdf'
-        self.body['server']['imageRef'] = image_href
-        self.body['server']['flavorRef'] = flavor_ref
+        self.body['server']['image_ref'] = image_href
+        self.body['server']['flavor_ref'] = flavor_ref
         self.req.body = jsonutils.dumps(self.body)
         self.assertRaises(webob.exc.HTTPBadRequest,
                           self.controller.create, self.req, self.body)
@@ -2781,8 +2762,8 @@ class ServersControllerCreateTest(test.TestCase):
     def test_create_instance_invalid_flavor_id_int(self):
         image_href = 'http://localhost/v2/images/2'
         flavor_ref = -1
-        self.body['server']['imageRef'] = image_href
-        self.body['server']['flavorRef'] = flavor_ref
+        self.body['server']['image_ref'] = image_href
+        self.body['server']['flavor_ref'] = flavor_ref
         self.req.body = jsonutils.dumps(self.body)
         self.assertRaises(webob.exc.HTTPBadRequest,
                           self.controller.create, self.req, self.body)
@@ -2790,15 +2771,15 @@ class ServersControllerCreateTest(test.TestCase):
     def test_create_instance_bad_flavor_href(self):
         image_href = 'http://localhost/v2/images/2'
         flavor_ref = 'http://localhost/v2/flavors/17'
-        self.body['server']['imageRef'] = image_href
-        self.body['server']['flavorRef'] = flavor_ref
+        self.body['server']['image_ref'] = image_href
+        self.body['server']['flavor_ref'] = flavor_ref
         self.req.body = jsonutils.dumps(self.body)
         self.assertRaises(webob.exc.HTTPBadRequest,
                           self.controller.create, self.req, self.body)
 
     def test_create_instance_bad_href(self):
         image_href = 'asdf'
-        self.body['server']['imageRef'] = image_href
+        self.body['server']['image_ref'] = image_href
         self.req.body = jsonutils.dumps(self.body)
 
         self.assertRaises(webob.exc.HTTPBadRequest,
@@ -2812,27 +2793,28 @@ class ServersControllerCreateTest(test.TestCase):
         self.assertEqual(FAKE_UUID, server['id'])
 
     def test_create_instance_admin_pass(self):
-        self.body['server']['flavorRef'] = 3,
-        self.body['server']['adminPass'] = 'testpass'
+        self.body['server']['flavor_ref'] = 3,
+        self.body['server']['admin_pass'] = 'testpass'
         self.req.body = jsonutils.dumps(self.body)
         res = self.controller.create(self.req, self.body).obj
 
         server = res['server']
-        self.assertEqual(server['adminPass'], self.body['server']['adminPass'])
+        self.assertEqual(server['admin_pass'],
+                         self.body['server']['admin_pass'])
 
     def test_create_instance_admin_pass_pass_disabled(self):
         self.flags(enable_instance_password=False)
-        self.body['server']['flavorRef'] = 3,
-        self.body['server']['adminPass'] = 'testpass'
+        self.body['server']['flavor_ref'] = 3,
+        self.body['server']['admin_pass'] = 'testpass'
         self.req.body = jsonutils.dumps(self.body)
         res = self.controller.create(self.req, self.body).obj
 
         server = res['server']
-        self.assertTrue('adminPass' in self.body['server'])
+        self.assertTrue('admin_pass' in self.body['server'])
 
     def test_create_instance_admin_pass_empty(self):
-        self.body['server']['flavorRef'] = 3,
-        self.body['server']['adminPass'] = ''
+        self.body['server']['flavor_ref'] = 3,
+        self.body['server']['admin_pass'] = ''
         self.req.body = jsonutils.dumps(self.body)
 
         # The fact that the action doesn't raise is enough validation
@@ -2871,7 +2853,7 @@ class ServersControllerCreateTest(test.TestCase):
     def _do_test_create_instance_above_quota(self, resource, allowed, quota,
                                              expected_msg):
         fakes.stub_out_instance_quota(self.stubs, allowed, quota, resource)
-        self.body['server']['flavorRef'] = 3
+        self.body['server']['flavor_ref'] = 3
         self.req.body = jsonutils.dumps(self.body)
         try:
             server = self.controller.create(self.req, self.body).obj['server']
@@ -2907,14 +2889,14 @@ class TestServerCreateRequestXMLDeserializer(test.TestCase):
         serial_request = """
 <server xmlns="http://docs.openstack.org/compute/api/v2"
         name="new-server-test"
-        imageRef="1"
-        flavorRef="2"/>"""
+        image_ref="1"
+        flavor_ref="2"/>"""
         request = self.deserializer.deserialize(serial_request)
         expected = {
             "server": {
                 "name": "new-server-test",
-                "imageRef": "1",
-                "flavorRef": "2",
+                "image_ref": "1",
+                "flavor_ref": "2",
             },
         }
         self.assertEquals(request['body'], expected)
@@ -2931,8 +2913,8 @@ class TestServerCreateRequestXMLDeserializer(test.TestCase):
         serial_request = """
 <server xmlns="http://docs.openstack.org/compute/api/v2"
         name="new-server-test"
-        imageRef="1"
-        flavorRef="2"/>"""
+        image_ref="1"
+        flavor_ref="2"/>"""
         self.assertRaises(KeyError, self.deserializer.deserialize,
                           serial_request)
 
@@ -2940,8 +2922,8 @@ class TestServerCreateRequestXMLDeserializer(test.TestCase):
         serial_request = """
 <ns2:server xmlns:ns2="http://docs.openstack.org/compute/api/v2"
         name="new-server-test"
-        imageRef="1"
-        flavorRef="2">
+        image_ref="1"
+        flavor_ref="2">
         <ns2:metadata><ns2:meta key="hello">world</ns2:meta></ns2:metadata>
         </ns2:server>
         """
@@ -2949,8 +2931,8 @@ class TestServerCreateRequestXMLDeserializer(test.TestCase):
         expected = {
             "server": {
                 "name": "new-server-test",
-                "imageRef": "1",
-                "flavorRef": "2",
+                "image_ref": "1",
+                "flavor_ref": "2",
                 'metadata': {"hello": "world"},
                 },
             }
@@ -2960,16 +2942,16 @@ class TestServerCreateRequestXMLDeserializer(test.TestCase):
         serial_request = """
 <server xmlns="http://docs.openstack.org/compute/api/v2"
         name="new-server-test"
-        imageRef="1"
-        flavorRef="2"
-        accessIPv4="1.2.3.4"/>"""
+        image_ref="1"
+        flavor_ref="2"
+        access_ip_v4="1.2.3.4"/>"""
         request = self.deserializer.deserialize(serial_request)
         expected = {
             "server": {
                 "name": "new-server-test",
-                "imageRef": "1",
-                "flavorRef": "2",
-                "accessIPv4": "1.2.3.4",
+                "image_ref": "1",
+                "flavor_ref": "2",
+                "access_ip_v4": "1.2.3.4",
             },
         }
         self.assertEquals(request['body'], expected)
@@ -2978,16 +2960,16 @@ class TestServerCreateRequestXMLDeserializer(test.TestCase):
         serial_request = """
 <server xmlns="http://docs.openstack.org/compute/api/v2"
         name="new-server-test"
-        imageRef="1"
-        flavorRef="2"
-        accessIPv6="fead::1234"/>"""
+        image_ref="1"
+        flavor_ref="2"
+        access_ip_v6="fead::1234"/>"""
         request = self.deserializer.deserialize(serial_request)
         expected = {
             "server": {
                 "name": "new-server-test",
-                "imageRef": "1",
-                "flavorRef": "2",
-                "accessIPv6": "fead::1234",
+                "image_ref": "1",
+                "flavor_ref": "2",
+                "access_ip_v6": "fead::1234",
             },
         }
         self.assertEquals(request['body'], expected)
@@ -2996,18 +2978,18 @@ class TestServerCreateRequestXMLDeserializer(test.TestCase):
         serial_request = """
 <server xmlns="http://docs.openstack.org/compute/api/v2"
         name="new-server-test"
-        imageRef="1"
-        flavorRef="2"
-        accessIPv4="1.2.3.4"
-        accessIPv6="fead::1234"/>"""
+        image_ref="1"
+        flavor_ref="2"
+        access_ip_v4="1.2.3.4"
+        access_ip_v6="fead::1234"/>"""
         request = self.deserializer.deserialize(serial_request)
         expected = {
             "server": {
                 "name": "new-server-test",
-                "imageRef": "1",
-                "flavorRef": "2",
-                "accessIPv4": "1.2.3.4",
-                "accessIPv6": "fead::1234",
+                "image_ref": "1",
+                "flavor_ref": "2",
+                "access_ip_v4": "1.2.3.4",
+                "access_ip_v6": "fead::1234",
             },
         }
         self.assertEquals(request['body'], expected)
@@ -3016,16 +2998,16 @@ class TestServerCreateRequestXMLDeserializer(test.TestCase):
         serial_request = """
 <server xmlns="http://docs.openstack.org/compute/api/v2"
         name="new-server-test"
-        imageRef="1"
-        flavorRef="2"
-        adminPass="1234"/>"""
+        image_ref="1"
+        flavor_ref="2"
+        admin_pass="1234"/>"""
         request = self.deserializer.deserialize(serial_request)
         expected = {
             "server": {
                 "name": "new-server-test",
-                "imageRef": "1",
-                "flavorRef": "2",
-                "adminPass": "1234",
+                "image_ref": "1",
+                "flavor_ref": "2",
+                "admin_pass": "1234",
             },
         }
         self.assertEquals(request['body'], expected)
@@ -3034,14 +3016,14 @@ class TestServerCreateRequestXMLDeserializer(test.TestCase):
         serial_request = """
 <server xmlns="http://docs.openstack.org/compute/api/v2"
         name="new-server-test"
-        imageRef="http://localhost:8774/v3/images/2"
-        flavorRef="3"/>"""
+        image_ref="http://localhost:8774/v3/images/2"
+        flavor_ref="3"/>"""
         request = self.deserializer.deserialize(serial_request)
         expected = {
             "server": {
                 "name": "new-server-test",
-                "imageRef": "http://localhost:8774/v3/images/2",
-                "flavorRef": "3",
+                "image_ref": "http://localhost:8774/v3/images/2",
+                "flavor_ref": "3",
             },
         }
         self.assertEquals(request['body'], expected)
@@ -3050,14 +3032,14 @@ class TestServerCreateRequestXMLDeserializer(test.TestCase):
         serial_request = """
 <server xmlns="http://docs.openstack.org/compute/api/v2"
         name="new-server-test"
-        imageRef="1"
-        flavorRef="http://localhost:8774/v3/flavors/3"/>"""
+        image_ref="1"
+        flavor_ref="http://localhost:8774/v3/flavors/3"/>"""
         request = self.deserializer.deserialize(serial_request)
         expected = {
             "server": {
                 "name": "new-server-test",
-                "imageRef": "1",
-                "flavorRef": "http://localhost:8774/v3/flavors/3",
+                "image_ref": "1",
+                "flavor_ref": "http://localhost:8774/v3/flavors/3",
             },
         }
         self.assertEquals(request['body'], expected)
@@ -3066,8 +3048,8 @@ class TestServerCreateRequestXMLDeserializer(test.TestCase):
         serial_request = """
 <server xmlns="http://docs.openstack.org/compute/api/v2"
         name="new-server-test"
-        imageRef="1"
-        flavorRef="2">
+        image_ref="1"
+        flavor_ref="2">
     <metadata/>
     <personality/>
 </server>"""
@@ -3075,8 +3057,8 @@ class TestServerCreateRequestXMLDeserializer(test.TestCase):
         expected = {
             "server": {
                 "name": "new-server-test",
-                "imageRef": "1",
-                "flavorRef": "2",
+                "image_ref": "1",
+                "flavor_ref": "2",
                 "metadata": {},
                 "personality": [],
             },
@@ -3087,8 +3069,8 @@ class TestServerCreateRequestXMLDeserializer(test.TestCase):
         serial_request = """
 <server xmlns="http://docs.openstack.org/compute/api/v2"
         name="new-server-test"
-        imageRef="1"
-        flavorRef="2">
+        image_ref="1"
+        flavor_ref="2">
     <metadata>
         <meta key="one">two</meta>
         <meta key="open">snack</meta>
@@ -3098,8 +3080,8 @@ class TestServerCreateRequestXMLDeserializer(test.TestCase):
         expected = {
             "server": {
                 "name": "new-server-test",
-                "imageRef": "1",
-                "flavorRef": "2",
+                "image_ref": "1",
+                "flavor_ref": "2",
                 "metadata": {"one": "two", "open": "snack"},
             },
         }
@@ -3109,8 +3091,8 @@ class TestServerCreateRequestXMLDeserializer(test.TestCase):
         serial_request = """
 <server xmlns="http://docs.openstack.org/compute/api/v2"
         name="new-server-test"
-        imageRef="1"
-        flavorRef="2">
+        image_ref="1"
+        flavor_ref="2">
     <personality>
         <file path="/etc/banner.txt">MQ==</file>
         <file path="/etc/hosts">Mg==</file>
@@ -3120,8 +3102,8 @@ class TestServerCreateRequestXMLDeserializer(test.TestCase):
         expected = {
             "server": {
                 "name": "new-server-test",
-                "imageRef": "1",
-                "flavorRef": "2",
+                "image_ref": "1",
+                "flavor_ref": "2",
                 "personality": [
                     {"path": "/etc/banner.txt", "contents": "MQ=="},
                     {"path": "/etc/hosts", "contents": "Mg=="},
@@ -3135,8 +3117,8 @@ class TestServerCreateRequestXMLDeserializer(test.TestCase):
                                "images/52415800-8b69-11e0-9b19-734f6f006e54")
         serial_request = """
 <server xmlns="http://docs.openstack.org/compute/api/v2"
-        imageRef="%s"
-        flavorRef="52415800-8b69-11e0-9b19-734f1195ff37"
+        image_ref="%s"
+        flavor_ref="52415800-8b69-11e0-9b19-734f1195ff37"
         name="new-server-test">
   <metadata>
     <meta key="My Server Name">Apache1</meta>
@@ -3149,9 +3131,9 @@ class TestServerCreateRequestXMLDeserializer(test.TestCase):
         expected = {
             "server": {
                 "name": "new-server-test",
-                "imageRef": ("http://servers.api.openstack.org/1234/"
+                "image_ref": ("http://servers.api.openstack.org/1234/"
                              "images/52415800-8b69-11e0-9b19-734f6f006e54"),
-                "flavorRef": "52415800-8b69-11e0-9b19-734f1195ff37",
+                "flavor_ref": "52415800-8b69-11e0-9b19-734f1195ff37",
                 "metadata": {"My Server Name": "Apache1"},
                 "personality": [
                     {
@@ -3166,14 +3148,14 @@ class TestServerCreateRequestXMLDeserializer(test.TestCase):
     def test_request_with_empty_networks(self):
         serial_request = """
 <server xmlns="http://docs.openstack.org/compute/api/v2"
- name="new-server-test" imageRef="1" flavorRef="1">
+ name="new-server-test" image_ref="1" flavor_ref="1">
     <networks/>
 </server>"""
         request = self.deserializer.deserialize(serial_request)
         expected = {"server": {
                 "name": "new-server-test",
-                "imageRef": "1",
-                "flavorRef": "1",
+                "image_ref": "1",
+                "flavor_ref": "1",
                 "networks": [],
                 }}
         self.assertEquals(request['body'], expected)
@@ -3181,7 +3163,7 @@ class TestServerCreateRequestXMLDeserializer(test.TestCase):
     def test_request_with_one_network(self):
         serial_request = """
 <server xmlns="http://docs.openstack.org/compute/api/v2"
- name="new-server-test" imageRef="1" flavorRef="1">
+ name="new-server-test" image_ref="1" flavor_ref="1">
     <networks>
        <network uuid="1" fixed_ip="10.0.1.12"/>
     </networks>
@@ -3189,8 +3171,8 @@ class TestServerCreateRequestXMLDeserializer(test.TestCase):
         request = self.deserializer.deserialize(serial_request)
         expected = {"server": {
                 "name": "new-server-test",
-                "imageRef": "1",
-                "flavorRef": "1",
+                "image_ref": "1",
+                "flavor_ref": "1",
                 "networks": [{"uuid": "1", "fixed_ip": "10.0.1.12"}],
                 }}
         self.assertEquals(request['body'], expected)
@@ -3198,7 +3180,7 @@ class TestServerCreateRequestXMLDeserializer(test.TestCase):
     def test_request_with_two_networks(self):
         serial_request = """
 <server xmlns="http://docs.openstack.org/compute/api/v2"
- name="new-server-test" imageRef="1" flavorRef="1">
+ name="new-server-test" image_ref="1" flavor_ref="1">
     <networks>
        <network uuid="1" fixed_ip="10.0.1.12"/>
        <network uuid="2" fixed_ip="10.0.2.12"/>
@@ -3207,8 +3189,8 @@ class TestServerCreateRequestXMLDeserializer(test.TestCase):
         request = self.deserializer.deserialize(serial_request)
         expected = {"server": {
                 "name": "new-server-test",
-                "imageRef": "1",
-                "flavorRef": "1",
+                "image_ref": "1",
+                "flavor_ref": "1",
                 "networks": [{"uuid": "1", "fixed_ip": "10.0.1.12"},
                              {"uuid": "2", "fixed_ip": "10.0.2.12"}],
                 }}
@@ -3217,7 +3199,7 @@ class TestServerCreateRequestXMLDeserializer(test.TestCase):
     def test_request_with_second_network_node_ignored(self):
         serial_request = """
 <server xmlns="http://docs.openstack.org/compute/api/v2"
- name="new-server-test" imageRef="1" flavorRef="1">
+ name="new-server-test" image_ref="1" flavor_ref="1">
     <networks>
        <network uuid="1" fixed_ip="10.0.1.12"/>
     </networks>
@@ -3228,8 +3210,8 @@ class TestServerCreateRequestXMLDeserializer(test.TestCase):
         request = self.deserializer.deserialize(serial_request)
         expected = {"server": {
                 "name": "new-server-test",
-                "imageRef": "1",
-                "flavorRef": "1",
+                "image_ref": "1",
+                "flavor_ref": "1",
                 "networks": [{"uuid": "1", "fixed_ip": "10.0.1.12"}],
                 }}
         self.assertEquals(request['body'], expected)
@@ -3237,7 +3219,7 @@ class TestServerCreateRequestXMLDeserializer(test.TestCase):
     def test_request_with_one_network_missing_id(self):
         serial_request = """
 <server xmlns="http://docs.openstack.org/compute/api/v2"
- name="new-server-test" imageRef="1" flavorRef="1">
+ name="new-server-test" image_ref="1" flavor_ref="1">
     <networks>
        <network fixed_ip="10.0.1.12"/>
     </networks>
@@ -3245,8 +3227,8 @@ class TestServerCreateRequestXMLDeserializer(test.TestCase):
         request = self.deserializer.deserialize(serial_request)
         expected = {"server": {
                 "name": "new-server-test",
-                "imageRef": "1",
-                "flavorRef": "1",
+                "image_ref": "1",
+                "flavor_ref": "1",
                 "networks": [{"fixed_ip": "10.0.1.12"}],
                 }}
         self.assertEquals(request['body'], expected)
@@ -3254,7 +3236,7 @@ class TestServerCreateRequestXMLDeserializer(test.TestCase):
     def test_request_with_one_network_missing_fixed_ip(self):
         serial_request = """
 <server xmlns="http://docs.openstack.org/compute/api/v2"
- name="new-server-test" imageRef="1" flavorRef="1">
+ name="new-server-test" image_ref="1" flavor_ref="1">
     <networks>
        <network uuid="1"/>
     </networks>
@@ -3262,8 +3244,8 @@ class TestServerCreateRequestXMLDeserializer(test.TestCase):
         request = self.deserializer.deserialize(serial_request)
         expected = {"server": {
                 "name": "new-server-test",
-                "imageRef": "1",
-                "flavorRef": "1",
+                "image_ref": "1",
+                "flavor_ref": "1",
                 "networks": [{"uuid": "1"}],
                 }}
         self.assertEquals(request['body'], expected)
@@ -3271,7 +3253,7 @@ class TestServerCreateRequestXMLDeserializer(test.TestCase):
     def test_request_with_one_network_empty_id(self):
         serial_request = """
     <server xmlns="http://docs.openstack.org/compute/api/v2"
-     name="new-server-test" imageRef="1" flavorRef="1">
+     name="new-server-test" image_ref="1" flavor_ref="1">
         <networks>
            <network uuid="" fixed_ip="10.0.1.12"/>
         </networks>
@@ -3279,8 +3261,8 @@ class TestServerCreateRequestXMLDeserializer(test.TestCase):
         request = self.deserializer.deserialize(serial_request)
         expected = {"server": {
                 "name": "new-server-test",
-                "imageRef": "1",
-                "flavorRef": "1",
+                "image_ref": "1",
+                "flavor_ref": "1",
                 "networks": [{"uuid": "", "fixed_ip": "10.0.1.12"}],
                 }}
         self.assertEquals(request['body'], expected)
@@ -3288,7 +3270,7 @@ class TestServerCreateRequestXMLDeserializer(test.TestCase):
     def test_request_with_one_network_empty_fixed_ip(self):
         serial_request = """
     <server xmlns="http://docs.openstack.org/compute/api/v2"
-     name="new-server-test" imageRef="1" flavorRef="1">
+     name="new-server-test" image_ref="1" flavor_ref="1">
         <networks>
            <network uuid="1" fixed_ip=""/>
         </networks>
@@ -3296,8 +3278,8 @@ class TestServerCreateRequestXMLDeserializer(test.TestCase):
         request = self.deserializer.deserialize(serial_request)
         expected = {"server": {
                 "name": "new-server-test",
-                "imageRef": "1",
-                "flavorRef": "1",
+                "image_ref": "1",
+                "flavor_ref": "1",
                 "networks": [{"uuid": "1", "fixed_ip": ""}],
                 }}
         self.assertEquals(request['body'], expected)
@@ -3305,7 +3287,7 @@ class TestServerCreateRequestXMLDeserializer(test.TestCase):
     def test_request_with_networks_duplicate_ids(self):
         serial_request = """
     <server xmlns="http://docs.openstack.org/compute/api/v2"
-     name="new-server-test" imageRef="1" flavorRef="1">
+     name="new-server-test" image_ref="1" flavor_ref="1">
         <networks>
            <network uuid="1" fixed_ip="10.0.1.12"/>
            <network uuid="1" fixed_ip="10.0.2.12"/>
@@ -3314,8 +3296,8 @@ class TestServerCreateRequestXMLDeserializer(test.TestCase):
         request = self.deserializer.deserialize(serial_request)
         expected = {"server": {
                 "name": "new-server-test",
-                "imageRef": "1",
-                "flavorRef": "1",
+                "image_ref": "1",
+                "flavor_ref": "1",
                 "networks": [{"uuid": "1", "fixed_ip": "10.0.1.12"},
                              {"uuid": "1", "fixed_ip": "10.0.2.12"}],
                 }}
@@ -3324,14 +3306,14 @@ class TestServerCreateRequestXMLDeserializer(test.TestCase):
     def test_request_with_multiple_create_args(self):
         serial_request = """
     <server xmlns="http://docs.openstack.org/compute/api/v2"
-     name="new-server-test" imageRef="1" flavorRef="1"
+     name="new-server-test" image_ref="1" flavor_ref="1"
      min_count="1" max_count="3" return_reservation_id="True">
     </server>"""
         request = self.deserializer.deserialize(serial_request)
         expected = {"server": {
                 "name": "new-server-test",
-                "imageRef": "1",
-                "flavorRef": "1",
+                "image_ref": "1",
+                "flavor_ref": "1",
                 "min_count": "1",
                 "max_count": "3",
                 "return_reservation_id": True,
@@ -3390,7 +3372,7 @@ class TestServerCreateRequestXMLDeserializer(test.TestCase):
     def test_request_with_block_device_mapping(self):
         serial_request = """
     <server xmlns="http://docs.openstack.org/compute/api/v2"
-     name="new-server-test" imageRef="1" flavorRef="1">
+     name="new-server-test" image_ref="1" flavor_ref="1">
        <block_device_mapping>
          <mapping volume_id="7329b667-50c7-46a6-b913-cb2a09dfeee0"
           device_name="/dev/vda" virtual_name="root"
@@ -3404,8 +3386,8 @@ class TestServerCreateRequestXMLDeserializer(test.TestCase):
         request = self.deserializer.deserialize(serial_request)
         expected = {"server": {
                 "name": "new-server-test",
-                "imageRef": "1",
-                "flavorRef": "1",
+                "image_ref": "1",
+                "flavor_ref": "1",
                 "block_device_mapping": [
                     {
                         "volume_id": "7329b667-50c7-46a6-b913-cb2a09dfeee0",
@@ -3508,8 +3490,10 @@ class TestAddressesXMLSerialization(test.TestCase):
     def test_xml_declaration(self):
         fixture = {
             'network_2': [
-                {'addr': '192.168.0.1', 'version': 4},
-                {'addr': 'fe80::beef', 'version': 6},
+                {'addr': '192.168.0.1', 'version': 4,
+                 'type': 'fixed', 'mac_addr': 'aa:aa:aa:aa:aa:aa'},
+                {'addr': 'fe80::beef', 'version': 6,
+                 'type': 'fixed', 'mac_addr': 'aa:aa:aa:aa:aa:aa'}
             ],
         }
         output = self.show_serializer.serialize(fixture)
@@ -3519,8 +3503,10 @@ class TestAddressesXMLSerialization(test.TestCase):
     def test_show(self):
         fixture = {
             'network_2': [
-                {'addr': '192.168.0.1', 'version': 4},
-                {'addr': 'fe80::beef', 'version': 6},
+                {'addr': '192.168.0.1', 'version': 4,
+                 'type': 'fixed', 'mac_addr': 'aa:aa:aa:aa:aa:aa'},
+                {'addr': 'fe80::beef', 'version': 6,
+                 'type': 'fixed', 'mac_addr': 'aa:aa:aa:aa:aa:aa'}
             ],
         }
         output = self.show_serializer.serialize(fixture)
@@ -3534,23 +3520,31 @@ class TestAddressesXMLSerialization(test.TestCase):
                              str(ip['version']))
             self.assertEqual(str(ip_elem.get('addr')),
                              str(ip['addr']))
+            self.assertEqual(str(ip_elem.get('type')),
+                                 str(ip['type']))
+            self.assertEqual(str(ip_elem.get('mac_addr')),
+                                 str(ip['mac_addr']))
 
     def test_index(self):
         fixture = {
             'addresses': {
                 'network_1': [
-                    {'addr': '192.168.0.3', 'version': 4},
-                    {'addr': '192.168.0.5', 'version': 4},
+                    {'addr': '192.168.0.3', 'version': 4,
+                     'type': 'fixed', 'mac_addr': 'aa:aa:aa:aa:aa:aa'},
+                    {'addr': '192.168.0.5', 'version': 4,
+                     'type': 'fixed', 'mac_addr': 'aa:aa:aa:aa:aa:aa'}
                 ],
                 'network_2': [
-                    {'addr': '192.168.0.1', 'version': 4},
-                    {'addr': 'fe80::beef', 'version': 6},
+                    {'addr': '192.168.0.1', 'version': 4,
+                     'type': 'fixed', 'mac_addr': 'aa:aa:aa:aa:aa:aa'},
+                    {'addr': 'fe80::beef', 'version': 6,
+                     'type': 'fixed', 'mac_addr': 'aa:aa:aa:aa:aa:aa'}
                 ],
             },
         }
         output = self.index_serializer.serialize(fixture)
         root = etree.XML(output)
-        xmlutil.validate_schema(root, 'addresses')
+        xmlutil.validate_schema(root, 'addresses', version='v3')
         addresses_dict = fixture['addresses']
         network_elems = root.findall('{0}network'.format(NS))
         self.assertEqual(len(network_elems), 2)
@@ -3564,6 +3558,10 @@ class TestAddressesXMLSerialization(test.TestCase):
                                  str(ip['version']))
                 self.assertEqual(str(ip_elem.get('addr')),
                                  str(ip['addr']))
+                self.assertEqual(str(ip_elem.get('type')),
+                                 str(ip['type']))
+                self.assertEqual(str(ip_elem.get('mac_addr')),
+                                 str(ip['mac_addr']))
 
 
 class ServersViewBuilderTest(test.TestCase):
@@ -3597,7 +3595,7 @@ class ServersViewBuilderTest(test.TestCase):
                                                                 floaters)
 
         self.uuid = self.instance['uuid']
-        self.view_builder = views.servers.ViewBuilder()
+        self.view_builder = views.servers.ViewBuilderV3()
         self.request = fakes.HTTPRequestV3.blank("")
 
     def test_get_flavor_valid_instance_type(self):
@@ -3668,9 +3666,9 @@ class ServersViewBuilderTest(test.TestCase):
                 "progress": 0,
                 "name": "test_server",
                 "status": "BUILD",
-                "accessIPv4": "",
-                "accessIPv6": "",
-                "hostId": '',
+                "access_ip_v4": "",
+                "access_ip_v6": "",
+                "host_id": '',
                 "image": {
                     "id": "5",
                     "links": [
@@ -3691,8 +3689,10 @@ class ServersViewBuilderTest(test.TestCase):
                 },
                 "addresses": {
                     'test1': [
-                        {'version': 4, 'addr': '192.168.1.100'},
-                        {'version': 6, 'addr': '2001:db8:0:1::1'}
+                        {'version': 4, 'addr': '192.168.1.100',
+                         'type': 'fixed', 'mac_addr': 'aa:aa:aa:aa:aa:aa'},
+                        {'version': 6, 'addr': '2001:db8:0:1::1',
+                         'type': 'fixed', 'mac_addr': 'aa:aa:aa:aa:aa:aa'}
                     ]
                 },
                 "metadata": {},
@@ -3740,9 +3740,9 @@ class ServersViewBuilderTest(test.TestCase):
                 "created": "2010-10-10T12:00:00Z",
                 "name": "test_server",
                 "status": "ERROR",
-                "accessIPv4": "",
-                "accessIPv6": "",
-                "hostId": '',
+                "access_ip_v4": "",
+                "access_ip_v6": "",
+                "host_id": '',
                 "image": {
                     "id": "5",
                     "links": [
@@ -3763,8 +3763,10 @@ class ServersViewBuilderTest(test.TestCase):
                 },
                 "addresses": {
                     'test1': [
-                        {'version': 4, 'addr': '192.168.1.100'},
-                        {'version': 6, 'addr': '2001:db8:0:1::1'}
+                        {'version': 4, 'addr': '192.168.1.100',
+                         'type': 'fixed', 'mac_addr': 'aa:aa:aa:aa:aa:aa'},
+                        {'version': 6, 'addr': '2001:db8:0:1::1',
+                         'type': 'fixed', 'mac_addr': 'aa:aa:aa:aa:aa:aa'}
                     ]
                 },
                 "metadata": {},
@@ -3886,9 +3888,9 @@ class ServersViewBuilderTest(test.TestCase):
                 "progress": 100,
                 "name": "test_server",
                 "status": "ACTIVE",
-                "accessIPv4": "",
-                "accessIPv6": "",
-                "hostId": '',
+                "access_ip_v4": "",
+                "access_ip_v6": "",
+                "host_id": '',
                 "image": {
                     "id": "5",
                     "links": [
@@ -3909,8 +3911,10 @@ class ServersViewBuilderTest(test.TestCase):
                 },
                 "addresses": {
                     'test1': [
-                        {'version': 4, 'addr': '192.168.1.100'},
-                        {'version': 6, 'addr': '2001:db8:0:1::1'}
+                        {'version': 4, 'addr': '192.168.1.100',
+                         'type': 'fixed', 'mac_addr': 'aa:aa:aa:aa:aa:aa'},
+                        {'version': 6, 'addr': '2001:db8:0:1::1',
+                         'type': 'fixed', 'mac_addr': 'aa:aa:aa:aa:aa:aa'}
                     ]
                 },
                 "metadata": {},
@@ -3948,7 +3952,7 @@ class ServersViewBuilderTest(test.TestCase):
                 "progress": 0,
                 "name": "test_server",
                 "status": "BUILD",
-                "hostId": '',
+                "host_id": '',
                 "image": {
                     "id": "5",
                     "links": [
@@ -3969,13 +3973,15 @@ class ServersViewBuilderTest(test.TestCase):
                 },
                 "addresses": {
                     'test1': [
-                        {'version': 4, 'addr': '192.168.1.100'},
-                        {'version': 6, 'addr': '2001:db8:0:1::1'}
+                        {'version': 4, 'addr': '192.168.1.100',
+                         'type': 'fixed', 'mac_addr': 'aa:aa:aa:aa:aa:aa'},
+                        {'version': 6, 'addr': '2001:db8:0:1::1',
+                         'type': 'fixed', 'mac_addr': 'aa:aa:aa:aa:aa:aa'},
                     ]
                 },
                 "metadata": {},
-                "accessIPv4": "1.2.3.4",
-                "accessIPv6": "",
+                "access_ip_v4": "1.2.3.4",
+                "access_ip_v6": "",
                 "links": [
                     {
                         "rel": "self",
@@ -4010,7 +4016,7 @@ class ServersViewBuilderTest(test.TestCase):
                 "progress": 0,
                 "name": "test_server",
                 "status": "BUILD",
-                "hostId": '',
+                "host_id": '',
                 "image": {
                     "id": "5",
                     "links": [
@@ -4031,13 +4037,15 @@ class ServersViewBuilderTest(test.TestCase):
                 },
                 "addresses": {
                     'test1': [
-                        {'version': 4, 'addr': '192.168.1.100'},
-                        {'version': 6, 'addr': '2001:db8:0:1::1'}
+                        {'version': 4, 'addr': '192.168.1.100',
+                         'type': 'fixed', 'mac_addr': 'aa:aa:aa:aa:aa:aa'},
+                        {'version': 6, 'addr': '2001:db8:0:1::1',
+                         'type': 'fixed', 'mac_addr': 'aa:aa:aa:aa:aa:aa'},
                     ]
                 },
                 "metadata": {},
-                "accessIPv4": "",
-                "accessIPv6": "fead::1234",
+                "access_ip_v4": "",
+                "access_ip_v6": "fead::1234",
                 "links": [
                     {
                         "rel": "self",
@@ -4074,9 +4082,9 @@ class ServersViewBuilderTest(test.TestCase):
                 "progress": 0,
                 "name": "test_server",
                 "status": "BUILD",
-                "accessIPv4": "",
-                "accessIPv6": "",
-                "hostId": '',
+                "access_ip_v4": "",
+                "access_ip_v6": "",
+                "host_id": '',
                 "image": {
                     "id": "5",
                     "links": [
@@ -4097,8 +4105,10 @@ class ServersViewBuilderTest(test.TestCase):
                 },
                 "addresses": {
                     'test1': [
-                        {'version': 4, 'addr': '192.168.1.100'},
-                        {'version': 6, 'addr': '2001:db8:0:1::1'}
+                        {'version': 4, 'addr': '192.168.1.100',
+                         'type': 'fixed', 'mac_addr': 'aa:aa:aa:aa:aa:aa'},
+                        {'version': 6, 'addr': '2001:db8:0:1::1',
+                         'type': 'fixed', 'mac_addr': 'aa:aa:aa:aa:aa:aa'},
                     ]
                 },
                 "metadata": {"Open": "Stack"},
@@ -4141,9 +4151,9 @@ class ServerXMLSerializationTest(test.TestCase):
                 "progress": 0,
                 "name": "test_server",
                 "status": "BUILD",
-                "hostId": 'e4d909c290d0fb1ca068ffaddf22cbd0',
-                "accessIPv4": "1.2.3.4",
-                "accessIPv6": "fead::1234",
+                "host_id": 'e4d909c290d0fb1ca068ffaddf22cbd0',
+                "access_ip_v4": "1.2.3.4",
+                "access_ip_v6": "fead::1234",
                 "image": {
                     "id": "5",
                     "links": [
@@ -4167,20 +4177,28 @@ class ServerXMLSerializationTest(test.TestCase):
                         {
                             "version": 4,
                             "addr": "67.23.10.138",
+                            "type": "fixed",
+                            "mac_addr": "aa:aa:aa:aa:aa:aa"
                         },
                         {
                             "version": 6,
                             "addr": "::babe:67.23.10.138",
+                            "type": "fixed",
+                            "mac_addr": "aa:aa:aa:aa:aa:aa"
                         },
                     ],
                     "network_two": [
                         {
                             "version": 4,
                             "addr": "67.23.10.139",
+                            "type": "fixed",
+                            "mac_addr": "aa:aa:aa:aa:aa:aa"
                         },
                         {
                             "version": 6,
                             "addr": "::babe:67.23.10.139",
+                            "type": "fixed",
+                            "mac_addr": "aa:aa:aa:aa:aa:aa"
                         },
                     ],
                 },
@@ -4218,9 +4236,9 @@ class ServerXMLSerializationTest(test.TestCase):
                 "progress": 0,
                 "name": "test_server",
                 "status": "BUILD",
-                "hostId": 'e4d909c290d0fb1ca068ffaddf22cbd0',
-                "accessIPv4": "1.2.3.4",
-                "accessIPv6": "fead::1234",
+                "host_id": 'e4d909c290d0fb1ca068ffaddf22cbd0',
+                "access_ip_v4": "1.2.3.4",
+                "access_ip_v6": "fead::1234",
                 "image": {
                     "id": "5",
                     "links": [
@@ -4244,20 +4262,28 @@ class ServerXMLSerializationTest(test.TestCase):
                         {
                             "version": 4,
                             "addr": "67.23.10.138",
+                            "type": "fixed",
+                            "mac_addr": "aa:aa:aa:aa:aa:aa"
                         },
                         {
                             "version": 6,
                             "addr": "::babe:67.23.10.138",
+                            "type": "fixed",
+                            "mac_addr": "aa:aa:aa:aa:aa:aa"
                         },
                     ],
                     "network_two": [
                         {
                             "version": 4,
                             "addr": "67.23.10.139",
+                            "type": "fixed",
+                            "mac_addr": "aa:aa:aa:aa:aa:aa"
                         },
                         {
                             "version": 6,
                             "addr": "::babe:67.23.10.139",
+                            "type": "fixed",
+                            "mac_addr": "aa:aa:aa:aa:aa:aa"
                         },
                     ],
                 },
@@ -4280,13 +4306,13 @@ class ServerXMLSerializationTest(test.TestCase):
 
         output = serializer.serialize(fixture)
         root = etree.XML(output)
-        xmlutil.validate_schema(root, 'server')
+        xmlutil.validate_schema(root, 'server', version='v3')
 
         server_dict = fixture['server']
 
-        for key in ['name', 'id', 'created', 'accessIPv4',
-                    'updated', 'progress', 'status', 'hostId',
-                    'accessIPv6']:
+        for key in ['name', 'id', 'created', 'access_ip_v4',
+                    'updated', 'progress', 'status', 'host_id',
+                    'access_ip_v6']:
             self.assertEqual(root.get(key), str(server_dict[key]))
 
         link_nodes = root.findall('{0}link'.format(ATOMNS))
@@ -4333,6 +4359,10 @@ class ServerXMLSerializationTest(test.TestCase):
                                  str(ip['version']))
                 self.assertEqual(str(ip_elem.get('addr')),
                                  str(ip['addr']))
+                self.assertEqual(str(ip_elem.get('type')),
+                                 str(ip['type']))
+                self.assertEqual(str(ip_elem.get('mac_addr')),
+                                 str(ip['mac_addr']))
 
     def test_create(self):
         serializer = servers.FullServerTemplate()
@@ -4347,10 +4377,10 @@ class ServerXMLSerializationTest(test.TestCase):
                 "progress": 0,
                 "name": "test_server",
                 "status": "BUILD",
-                "accessIPv4": "1.2.3.4",
-                "accessIPv6": "fead::1234",
-                "hostId": "e4d909c290d0fb1ca068ffaddf22cbd0",
-                "adminPass": "test_password",
+                "access_ip_v4": "1.2.3.4",
+                "access_ip_v6": "fead::1234",
+                "host_id": "e4d909c290d0fb1ca068ffaddf22cbd0",
+                "admin_pass": "test_password",
                 "image": {
                     "id": "5",
                     "links": [
@@ -4374,20 +4404,28 @@ class ServerXMLSerializationTest(test.TestCase):
                         {
                             "version": 4,
                             "addr": "67.23.10.138",
+                            "type": "fixed",
+                            "mac_addr": "aa:aa:aa:aa:aa:aa"
                         },
                         {
                             "version": 6,
                             "addr": "::babe:67.23.10.138",
+                            "type": "fixed",
+                            "mac_addr": "aa:aa:aa:aa:aa:aa"
                         },
                     ],
                     "network_two": [
                         {
                             "version": 4,
                             "addr": "67.23.10.139",
+                            "type": "fixed",
+                            "mac_addr": "aa:aa:aa:aa:aa:aa"
                         },
                         {
                             "version": 6,
                             "addr": "::babe:67.23.10.139",
+                            "type": "fixed",
+                            "mac_addr": "aa:aa:aa:aa:aa:aa"
                         },
                     ],
                 },
@@ -4410,13 +4448,13 @@ class ServerXMLSerializationTest(test.TestCase):
 
         output = serializer.serialize(fixture)
         root = etree.XML(output)
-        xmlutil.validate_schema(root, 'server')
+        xmlutil.validate_schema(root, 'server', version='v3')
 
         server_dict = fixture['server']
 
-        for key in ['name', 'id', 'created', 'accessIPv4',
-                    'updated', 'progress', 'status', 'hostId',
-                    'accessIPv6', 'adminPass']:
+        for key in ['name', 'id', 'created', 'access_ip_v4',
+                    'updated', 'progress', 'status', 'host_id',
+                    'access_ip_v6', 'admin_pass']:
             self.assertEqual(root.get(key), str(server_dict[key]))
 
         link_nodes = root.findall('{0}link'.format(ATOMNS))
@@ -4463,6 +4501,10 @@ class ServerXMLSerializationTest(test.TestCase):
                                  str(ip['version']))
                 self.assertEqual(str(ip_elem.get('addr')),
                                  str(ip['addr']))
+                self.assertEqual(str(ip_elem.get('type')),
+                                 str(ip['type']))
+                self.assertEqual(str(ip_elem.get('mac_addr')),
+                                 str(ip['mac_addr']))
 
     def test_index(self):
         serializer = servers.MinimalServersTemplate()
@@ -4506,7 +4548,7 @@ class ServerXMLSerializationTest(test.TestCase):
 
         output = serializer.serialize(fixture)
         root = etree.XML(output)
-        xmlutil.validate_schema(root, 'servers_index')
+        xmlutil.validate_schema(root, 'servers_index', version='v3')
         server_elems = root.findall('{0}server'.format(NS))
         self.assertEqual(len(server_elems), 2)
         for i, server_elem in enumerate(server_elems):
@@ -4569,7 +4611,7 @@ class ServerXMLSerializationTest(test.TestCase):
 
         output = serializer.serialize(fixture)
         root = etree.XML(output)
-        xmlutil.validate_schema(root, 'servers_index')
+        xmlutil.validate_schema(root, 'servers_index', version='v3')
         server_elems = root.findall('{0}server'.format(NS))
         self.assertEqual(len(server_elems), 2)
         for i, server_elem in enumerate(server_elems):
@@ -4611,9 +4653,9 @@ class ServerXMLSerializationTest(test.TestCase):
                 "progress": 0,
                 "name": "test_server",
                 "status": "BUILD",
-                "accessIPv4": "1.2.3.4",
-                "accessIPv6": "fead::1234",
-                "hostId": 'e4d909c290d0fb1ca068ffaddf22cbd0',
+                "access_ip_v4": "1.2.3.4",
+                "access_ip_v6": "fead::1234",
+                "host_id": 'e4d909c290d0fb1ca068ffaddf22cbd0',
                 "image": {
                     "id": "5",
                     "links": [
@@ -4637,10 +4679,16 @@ class ServerXMLSerializationTest(test.TestCase):
                         {
                             "version": 4,
                             "addr": "67.23.10.138",
+                            "type": "fixed",
+                            "mac_addr": "aa:aa:aa:aa:aa:aa"
+
                         },
                         {
                             "version": 6,
                             "addr": "::babe:67.23.10.138",
+                            "type": "fixed",
+                            "mac_addr": "aa:aa:aa:aa:aa:aa"
+
                         },
                     ],
                 },
@@ -4667,9 +4715,9 @@ class ServerXMLSerializationTest(test.TestCase):
                 "progress": 100,
                 "name": "test_server_2",
                 "status": "ACTIVE",
-                "accessIPv4": "1.2.3.4",
-                "accessIPv6": "fead::1234",
-                "hostId": 'e4d909c290d0fb1ca068ffaddf22cbd0',
+                "access_ip_v4": "1.2.3.4",
+                "access_ip_v6": "fead::1234",
+                "host_id": 'e4d909c290d0fb1ca068ffaddf22cbd0',
                 "image": {
                     "id": "5",
                     "links": [
@@ -4693,10 +4741,16 @@ class ServerXMLSerializationTest(test.TestCase):
                         {
                             "version": 4,
                             "addr": "67.23.10.138",
+                            "type": "fixed",
+                            "mac_addr": "aa:aa:aa:aa:aa:aa"
+
                         },
                         {
                             "version": 6,
                             "addr": "::babe:67.23.10.138",
+                            "type": "fixed",
+                            "mac_addr": "aa:aa:aa:aa:aa:aa"
+
                         },
                     ],
                 },
@@ -4718,15 +4772,15 @@ class ServerXMLSerializationTest(test.TestCase):
 
         output = serializer.serialize(fixture)
         root = etree.XML(output)
-        xmlutil.validate_schema(root, 'servers')
+        xmlutil.validate_schema(root, 'servers', version='v3')
         server_elems = root.findall('{0}server'.format(NS))
         self.assertEqual(len(server_elems), 2)
         for i, server_elem in enumerate(server_elems):
             server_dict = fixture['servers'][i]
 
-            for key in ['name', 'id', 'created', 'accessIPv4',
-                        'updated', 'progress', 'status', 'hostId',
-                        'accessIPv6']:
+            for key in ['name', 'id', 'created', 'access_ip_v4',
+                        'updated', 'progress', 'status', 'host_id',
+                        'access_ip_v6']:
                 self.assertEqual(server_elem.get(key), str(server_dict[key]))
 
             link_nodes = server_elem.findall('{0}link'.format(ATOMNS))
@@ -4773,6 +4827,10 @@ class ServerXMLSerializationTest(test.TestCase):
                                      str(ip['version']))
                     self.assertEqual(str(ip_elem.get('addr')),
                                      str(ip['addr']))
+                    self.assertEqual(str(ip_elem.get('type')),
+                                 str(ip['type']))
+                self.assertEqual(str(ip_elem.get('mac_addr')),
+                                 str(ip['mac_addr']))
 
     def test_update(self):
         serializer = servers.ServerTemplate()
@@ -4787,9 +4845,9 @@ class ServerXMLSerializationTest(test.TestCase):
                 "progress": 0,
                 "name": "test_server",
                 "status": "BUILD",
-                "hostId": 'e4d909c290d0fb1ca068ffaddf22cbd0',
-                "accessIPv4": "1.2.3.4",
-                "accessIPv6": "fead::1234",
+                "host_id": 'e4d909c290d0fb1ca068ffaddf22cbd0',
+                "access_ip_v4": "1.2.3.4",
+                "access_ip_v6": "fead::1234",
                 "image": {
                     "id": "5",
                     "links": [
@@ -4813,20 +4871,28 @@ class ServerXMLSerializationTest(test.TestCase):
                         {
                             "version": 4,
                             "addr": "67.23.10.138",
+                            "type": "fixed",
+                            "mac_addr": "aa:aa:aa:aa:aa:aa"
                         },
                         {
                             "version": 6,
                             "addr": "::babe:67.23.10.138",
+                            "type": "fixed",
+                            "mac_addr": "aa:aa:aa:aa:aa:aa"
                         },
                     ],
                     "network_two": [
                         {
                             "version": 4,
                             "addr": "67.23.10.139",
+                            "type": "fixed",
+                            "mac_addr": "aa:aa:aa:aa:aa:aa"
                         },
                         {
                             "version": 6,
                             "addr": "::babe:67.23.10.139",
+                            "type": "fixed",
+                            "mac_addr": "aa:aa:aa:aa:aa:aa"
                         },
                     ],
                 },
@@ -4855,13 +4921,13 @@ class ServerXMLSerializationTest(test.TestCase):
 
         output = serializer.serialize(fixture)
         root = etree.XML(output)
-        xmlutil.validate_schema(root, 'server')
+        xmlutil.validate_schema(root, 'server', version='v3')
 
         server_dict = fixture['server']
 
-        for key in ['name', 'id', 'created', 'accessIPv4',
-                    'updated', 'progress', 'status', 'hostId',
-                    'accessIPv6']:
+        for key in ['name', 'id', 'created', 'access_ip_v4',
+                    'updated', 'progress', 'status', 'host_id',
+                    'access_ip_v6']:
             self.assertEqual(root.get(key), str(server_dict[key]))
 
         link_nodes = root.findall('{0}link'.format(ATOMNS))
@@ -4908,6 +4974,10 @@ class ServerXMLSerializationTest(test.TestCase):
                                  str(ip['version']))
                 self.assertEqual(str(ip_elem.get('addr')),
                                  str(ip['addr']))
+                self.assertEqual(str(ip_elem.get('type')),
+                                 str(ip['type']))
+                self.assertEqual(str(ip_elem.get('mac_addr')),
+                                 str(ip['mac_addr']))
 
         fault_root = root.find('{0}fault'.format(NS))
         fault_dict = server_dict['fault']
@@ -4931,10 +5001,10 @@ class ServerXMLSerializationTest(test.TestCase):
                 "progress": 0,
                 "name": "test_server",
                 "status": "BUILD",
-                "accessIPv4": "1.2.3.4",
-                "accessIPv6": "fead::1234",
-                "hostId": "e4d909c290d0fb1ca068ffaddf22cbd0",
-                "adminPass": "test_password",
+                "access_ip_v4": "1.2.3.4",
+                "access_ip_v6": "fead::1234",
+                "host_id": "e4d909c290d0fb1ca068ffaddf22cbd0",
+                "admin_pass": "test_password",
                 "image": {
                     "id": "5",
                     "links": [
@@ -4958,20 +5028,28 @@ class ServerXMLSerializationTest(test.TestCase):
                         {
                             "version": 4,
                             "addr": "67.23.10.138",
+                            "type": "fixed",
+                            "mac_addr": "aa:aa:aa:aa:aa:aa"
                         },
                         {
                             "version": 6,
                             "addr": "::babe:67.23.10.138",
+                            "type": "fixed",
+                            "mac_addr": "aa:aa:aa:aa:aa:aa"
                         },
                     ],
                     "network_two": [
                         {
                             "version": 4,
                             "addr": "67.23.10.139",
+                            "type": "fixed",
+                            "mac_addr": "aa:aa:aa:aa:aa:aa"
                         },
                         {
                             "version": 6,
                             "addr": "::babe:67.23.10.139",
+                            "type": "fixed",
+                            "mac_addr": "aa:aa:aa:aa:aa:aa"
                         },
                     ],
                 },
@@ -4994,13 +5072,13 @@ class ServerXMLSerializationTest(test.TestCase):
 
         output = serializer.serialize(fixture)
         root = etree.XML(output)
-        xmlutil.validate_schema(root, 'server')
+        xmlutil.validate_schema(root, 'server', version='v3')
 
         server_dict = fixture['server']
 
-        for key in ['name', 'id', 'created', 'accessIPv4',
-                    'updated', 'progress', 'status', 'hostId',
-                    'accessIPv6', 'adminPass']:
+        for key in ['name', 'id', 'created', 'access_ip_v4',
+                    'updated', 'progress', 'status', 'host_id',
+                    'access_ip_v6', 'admin_pass']:
             self.assertEqual(root.get(key), str(server_dict[key]))
 
         link_nodes = root.findall('{0}link'.format(ATOMNS))
@@ -5047,6 +5125,10 @@ class ServerXMLSerializationTest(test.TestCase):
                                  str(ip['version']))
                 self.assertEqual(str(ip_elem.get('addr')),
                                  str(ip['addr']))
+                self.assertEqual(str(ip_elem.get('type')),
+                                 str(ip['type']))
+                self.assertEqual(str(ip_elem.get('mac_addr')),
+                                 str(ip['mac_addr']))
 
 
 class ServersAllExtensionsTestCase(test.TestCase):

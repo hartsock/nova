@@ -31,6 +31,7 @@ from nova.openstack.common import jsonutils
 from nova.openstack.common import rpc
 from nova import test
 from nova.tests.api.openstack import fakes
+from nova.tests import fake_instance
 from nova.tests.image import fake
 
 
@@ -70,7 +71,7 @@ class ServersControllerCreateTest(test.TestCase):
             image_uuid = '76fa36fc-c930-4bf3-8c8a-ea2a2420deb6'
             def_image_ref = 'http://localhost/images/%s' % image_uuid
             self.instance_cache_num += 1
-            instance = {
+            instance = fake_instance.fake_db_instance(**{
                 'id': self.instance_cache_num,
                 'display_name': inst['display_name'] or 'test',
                 'uuid': FAKE_UUID,
@@ -88,7 +89,7 @@ class ServersControllerCreateTest(test.TestCase):
                 "fixed_ips": [],
                 "task_state": "",
                 "vm_state": "",
-            }
+            })
 
             self.instance_cache_by_id[instance['id']] = instance
             self.instance_cache_by_uuid[instance['uuid']] = instance
@@ -156,9 +157,9 @@ class ServersControllerCreateTest(test.TestCase):
     def _test_create_extra(self, params, no_image=False,
                            override_controller=None):
         image_uuid = 'c905cedb-7281-47e4-8a62-f26bc5fc4c77'
-        server = dict(name='server_test', imageRef=image_uuid, flavorRef=2)
+        server = dict(name='server_test', image_ref=image_uuid, flavor_ref=2)
         if no_image:
-            server.pop('imageRef', None)
+            server.pop('image_ref', None)
         server.update(params)
         body = dict(server=server)
         req = fakes.HTTPRequestV3.blank('/servers')
@@ -201,8 +202,8 @@ class ServersControllerCreateTest(test.TestCase):
         body = {
             'server': {
                 'name': 'user_data_test',
-                'imageRef': image_href,
-                'flavorRef': flavor_ref,
+                'image_ref': image_href,
+                'flavor_ref': flavor_ref,
                 'metadata': {
                     'hello': 'world',
                     'open': 'stack',
@@ -228,8 +229,8 @@ class ServersControllerCreateTest(test.TestCase):
         body = {
             'server': {
                 'name': 'user_data_test',
-                'imageRef': image_href,
-                'flavorRef': flavor_ref,
+                'image_ref': image_href,
+                'flavor_ref': flavor_ref,
                 'metadata': {
                     'hello': 'world',
                     'open': 'stack',
@@ -259,15 +260,15 @@ class TestServerCreateRequestXMLDeserializer(test.TestCase):
         serial_request = """
     <server xmlns="http://docs.openstack.org/compute/api/v3"
         name="user_data_test"
-        imageRef="1"
-        flavorRef="1"
+        image_ref="1"
+        flavor_ref="1"
         user_data="IyEvYmluL2Jhc2gKL2Jpbi9"/>"""
         request = self.deserializer.deserialize(serial_request)
         expected = {
             "server": {
                 "name": "user_data_test",
-                "imageRef": "1",
-                "flavorRef": "1",
+                "image_ref": "1",
+                "flavor_ref": "1",
                 "user_data": "IyEvYmluL2Jhc2gKL2Jpbi9"
             },
         }

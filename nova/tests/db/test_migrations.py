@@ -477,6 +477,31 @@ class TestNovaMigrations(BaseMigrationTestCase, CommonTestsMixIn):
                     globals(), locals(), ['versioning_api'], -1)
             self.migration_api = temp.versioning_api
 
+    def assertColumnExists(self, engine, table, column):
+        t = db_utils.get_table(engine, table)
+        self.assertIn(column, t.c)
+
+    def assertColumnNotExists(self, engine, table, column):
+        t = db_utils.get_table(engine, table)
+        self.assertNotIn(column, t.c)
+
+    def assertIndexExists(self, engine, table, index):
+        t = db_utils.get_table(engine, table)
+        index_names = [idx.name for idx in t.indexes]
+        self.assertIn(index, index_names)
+
+    def assertIndexMembers(self, engine, table, index, members):
+        self.assertIndexExists(engine, table, index)
+
+        t = db_utils.get_table(engine, table)
+        index_columns = None
+        for idx in t.indexes:
+            if idx.name == index:
+                index_columns = idx.columns.keys()
+                break
+
+        self.assertEqual(sorted(members), sorted(index_columns))
+
     def _pre_upgrade_134(self, engine):
         now = timeutils.utcnow()
         data = [{
@@ -2409,6 +2434,99 @@ class TestNovaMigrations(BaseMigrationTestCase, CommonTestsMixIn):
         self.assertFalse('user_id' in quota_usage)
         self.assertFalse('user_id' in reservation)
         self.assertFalse(table_exist)
+
+    def _check_204(self, engine, data):
+        if engine.name != 'sqlite':
+            return
+
+        meta = sqlalchemy.MetaData()
+        meta.bind = engine
+        reservations = sqlalchemy.Table('reservations', meta, autoload=True)
+
+        index_data = [(idx.name, idx.columns.keys())
+                      for idx in reservations.indexes]
+
+        if engine.name == "postgresql":
+            # we can not get correct order of columns in index
+            # definition to postgresql using sqlalchemy. So we sort
+            # columns list before compare
+            # bug http://www.sqlalchemy.org/trac/ticket/2767
+            self.assertIn(
+                ('reservations_uuid_idx', sorted(['uuid'])),
+                ([(idx[0], sorted(idx[1])) for idx in index_data])
+            )
+        else:
+            self.assertIn(('reservations_uuid_idx', ['uuid']), index_data)
+
+    def _pre_upgrade_205(self, engine):
+        fake_instances = [dict(uuid='m205-uuid1', locked=True),
+                          dict(uuid='m205-uuid2', locked=False)]
+        for table_name in ['instances', 'shadow_instances']:
+            table = db_utils.get_table(engine, table_name)
+            engine.execute(table.insert(), fake_instances)
+
+    def _check_205(self, engine, data):
+        for table_name in ['instances', 'shadow_instances']:
+            table = db_utils.get_table(engine, table_name)
+            rows = table.select().\
+                where(table.c.uuid.in_(['m205-uuid1', 'm205-uuid2'])).\
+                order_by(table.c.uuid).execute().fetchall()
+            self.assertEqual(rows[0]['locked_by'], 'admin')
+            self.assertEqual(rows[1]['locked_by'], None)
+
+    def _post_downgrade_205(self, engine):
+        for table_name in ['instances', 'shadow_instances']:
+            table = db_utils.get_table(engine, table_name)
+            rows = table.select().execute().fetchall()
+            self.assertFalse('locked_by' in rows[0])
+
+    def _pre_upgrade_206(self, engine):
+        instances = db_utils.get_table(engine, 'instances')
+        shadow_instances = db_utils.get_table(engine, 'shadow_instances')
+
+        data = [
+            {
+                'id': 650,
+                'deleted': 0,
+            },
+            {
+                'id': 651,
+                'deleted': 2,
+            },
+        ]
+        for item in data:
+            instances.insert().values(item).execute()
+            shadow_instances.insert().values(item).execute()
+        return data
+
+    def _check_206(self, engine, data):
+        self.assertColumnExists(engine, 'instances', 'cleaned')
+        self.assertColumnExists(engine, 'shadow_instances', 'cleaned')
+        self.assertIndexMembers(engine, 'instances',
+                                'instances_host_deleted_cleaned_idx',
+                                ['host', 'deleted', 'cleaned'])
+
+        instances = db_utils.get_table(engine, 'instances')
+        shadow_instances = db_utils.get_table(engine, 'shadow_instances')
+
+        def get_(table, ident):
+            return table.select().\
+                where(table.c.id == ident).\
+                execute().\
+                first()
+
+        for table in (instances, shadow_instances):
+            id_1 = get_(instances, 650)
+            self.assertEqual(0, id_1['deleted'])
+            self.assertEqual(0, id_1['cleaned'])
+
+            id_2 = get_(instances, 651)
+            self.assertEqual(2, id_2['deleted'])
+            self.assertEqual(1, id_2['cleaned'])
+
+    def _post_downgrade_206(self, engine):
+        self.assertColumnNotExists(engine, 'instances', 'cleaned')
+        self.assertColumnNotExists(engine, 'shadow_instances', 'cleaned')
 
 
 class TestBaremetalMigrations(BaseMigrationTestCase, CommonTestsMixIn):

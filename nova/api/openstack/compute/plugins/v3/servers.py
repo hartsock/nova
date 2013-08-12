@@ -24,7 +24,7 @@ import webob
 from webob import exc
 
 from nova.api.openstack import common
-from nova.api.openstack.compute import ips
+from nova.api.openstack.compute.plugins.v3 import ips
 from nova.api.openstack.compute.views import servers as views_servers
 from nova.api.openstack import extensions
 from nova.api.openstack import wsgi
@@ -69,13 +69,13 @@ def make_server(elem, detailed=False):
     elem.set('id')
 
     if detailed:
-        elem.set('userId', 'user_id')
-        elem.set('tenantId', 'tenant_id')
+        elem.set('user_id')
+        elem.set('tenant_id')
         elem.set('updated')
         elem.set('created')
-        elem.set('hostId')
-        elem.set('accessIPv4')
-        elem.set('accessIPv6')
+        elem.set('host_id')
+        elem.set('access_ip_v4')
+        elem.set('access_ip_v6')
         elem.set('status')
         elem.set('progress')
         elem.set('reservation_id')
@@ -132,7 +132,7 @@ class ServersTemplate(xmlutil.TemplateBuilder):
 class ServerAdminPassTemplate(xmlutil.TemplateBuilder):
     def construct(self):
         root = xmlutil.TemplateElement('server')
-        root.set('adminPass')
+        root.set('admin_pass')
         return xmlutil.SlaveTemplate(root, 1, nsmap=server_nsmap)
 
 
@@ -182,8 +182,8 @@ class CommonDeserializer(wsgi.MetadataXMLDeserializer):
         server = {}
         server_node = self.find_first_child_named(node, 'server')
 
-        attributes = ["name", "imageRef", "flavorRef", "adminPass",
-                      "accessIPv4", "accessIPv6", "key_name",
+        attributes = ["name", "image_ref", "flavor_ref", "admin_pass",
+                      "access_ip_v4", "access_ip_v6", "key_name",
                       "min_count", "max_count"]
         for attr in attributes:
             if server_node.getAttribute(attr):
@@ -308,13 +308,13 @@ class ActionDeserializer(CommonDeserializer):
         action_name = action_node.tagName
 
         action_deserializer = {
-            'createImage': self._action_create_image,
-            'changePassword': self._action_change_password,
+            'create_image': self._action_create_image,
+            'change_password': self._action_change_password,
             'reboot': self._action_reboot,
             'rebuild': self._action_rebuild,
             'resize': self._action_resize,
-            'confirmResize': self._action_confirm_resize,
-            'revertResize': self._action_revert_resize,
+            'confirm_resize': self._action_confirm_resize,
+            'revert_resize': self._action_revert_resize,
         }.get(action_name, super(ActionDeserializer, self).default)
 
         action_data = action_deserializer(action_node)
@@ -323,11 +323,6 @@ class ActionDeserializer(CommonDeserializer):
 
     def _action_create_image(self, node):
         return self._deserialize_image_action(node, ('name',))
-
-    def _action_change_password(self, node):
-        if not node.hasAttribute("adminPass"):
-            raise AttributeError("No adminPass was specified in request")
-        return {"adminPass": node.getAttribute("adminPass")}
 
     def _action_reboot(self, node):
         if not node.hasAttribute("type"):
@@ -361,28 +356,28 @@ class ActionDeserializer(CommonDeserializer):
         if personality is not None:
             rebuild["personality"] = personality
 
-        if not node.hasAttribute("imageRef"):
-            raise AttributeError("No imageRef was specified in request")
-        rebuild["imageRef"] = node.getAttribute("imageRef")
+        if not node.hasAttribute("image_ref"):
+            raise AttributeError("No image_ref was specified in request")
+        rebuild["image_ref"] = node.getAttribute("image_ref")
 
-        if node.hasAttribute("adminPass"):
-            rebuild["adminPass"] = node.getAttribute("adminPass")
+        if node.hasAttribute("admin_pass"):
+            rebuild["admin_pass"] = node.getAttribute("admin_pass")
 
-        if node.hasAttribute("accessIPv4"):
-            rebuild["accessIPv4"] = node.getAttribute("accessIPv4")
+        if node.hasAttribute("access_ipv4"):
+            rebuild["access_ip_v4"] = node.getAttribute("access_ip_v4")
 
-        if node.hasAttribute("accessIPv6"):
-            rebuild["accessIPv6"] = node.getAttribute("accessIPv6")
+        if node.hasAttribute("access_ipv6"):
+            rebuild["access_ip_v6"] = node.getAttribute("access_ip_v6")
 
         return rebuild
 
     def _action_resize(self, node):
         resize = {}
 
-        if node.hasAttribute("flavorRef"):
-            resize["flavorRef"] = node.getAttribute("flavorRef")
+        if node.hasAttribute("flavor_ref"):
+            resize["flavor_ref"] = node.getAttribute("flavor_ref")
         else:
-            raise AttributeError("No flavorRef was specified in request")
+            raise AttributeError("No flavor_ref was specified in request")
 
         # TODO(cyeoh): bp v3-api-core-as-extensions
         # Replace with an extension point when the disk_config
@@ -437,7 +432,7 @@ class ServersController(wsgi.Controller):
     EXTENSION_CREATE_NAMESPACE = 'nova.api.v3.extensions.server.create'
     EXTENSION_DESERIALIZE_EXTRACT_SERVER_NAMESPACE = (
         'nova.api.v3.extensions.server.create.deserialize')
-    _view_builder_class = views_servers.ViewBuilder
+    _view_builder_class = views_servers.ViewBuilderV3
 
     @staticmethod
     def _add_location(robj):
@@ -566,23 +561,23 @@ class ServersController(wsgi.Controller):
                 return {'servers': []}
             search_opts['vm_state'] = state
 
-        if 'changes-since' in search_opts:
+        if 'changes_since' in search_opts:
             try:
-                parsed = timeutils.parse_isotime(search_opts['changes-since'])
+                parsed = timeutils.parse_isotime(search_opts['changes_since'])
             except ValueError:
-                msg = _('Invalid changes-since value')
+                msg = _('Invalid changes_since value')
                 raise exc.HTTPBadRequest(explanation=msg)
-            search_opts['changes-since'] = parsed
+            search_opts['changes_since'] = parsed
 
         # By default, compute's get_all() will return deleted instances.
         # If an admin hasn't specified a 'deleted' search option, we need
         # to filter out deleted instances by setting the filter ourselves.
-        # ... Unless 'changes-since' is specified, because 'changes-since'
+        # ... Unless 'changes_since' is specified, because 'changes_since'
         # should return recently deleted images according to the API spec.
 
         if 'deleted' not in search_opts:
-            if 'changes-since' not in search_opts:
-                # No 'changes-since', so we only want non-deleted servers
+            if 'changes_since' not in search_opts:
+                # No 'changes_since', so we only want non-deleted servers
                 search_opts['deleted'] = False
 
         if search_opts.get("vm_state") == "deleted":
@@ -700,17 +695,31 @@ class ServersController(wsgi.Controller):
         networks = []
         for network in requested_networks:
             try:
+                # fixed IP address is optional
+                # if the fixed IP address is not provided then
+                # it will use one of the available IP address from the network
+                address = network.get('fixed_ip', None)
+                if address is not None and not utils.is_valid_ipv4(address):
+                    msg = _("Invalid fixed IP address (%s)") % address
+                    raise exc.HTTPBadRequest(explanation=msg)
+
                 port_id = network.get('port', None)
                 if port_id:
                     network_uuid = None
                     if not self._is_neutron_v2():
                         # port parameter is only for neutron v2.0
-                        msg = _("Unknown argment : port")
+                        msg = _("Unknown argument: port")
                         raise exc.HTTPBadRequest(explanation=msg)
                     if not uuidutils.is_uuid_like(port_id):
                         msg = _("Bad port format: port uuid is "
                                 "not in proper format "
                                 "(%s)") % port_id
+                        raise exc.HTTPBadRequest(explanation=msg)
+                    if address is not None:
+                        msg = _("Specified Fixed IP '%(addr)s' cannot be used "
+                                "with port '%(port)s': port already has "
+                                "a Fixed IP allocated.") % {"addr": address,
+                                                            "port": port_id}
                         raise exc.HTTPBadRequest(explanation=msg)
                 else:
                     network_uuid = network['uuid']
@@ -723,15 +732,7 @@ class ServersController(wsgi.Controller):
                                 "(%s)") % network_uuid
                         raise exc.HTTPBadRequest(explanation=msg)
 
-                #fixed IP address is optional
-                #if the fixed IP address is not provided then
-                #it will use one of the available IP address from the network
-                address = network.get('fixed_ip', None)
-                if address is not None and not utils.is_valid_ipv4(address):
-                    msg = _("Invalid fixed IP address (%s)") % address
-                    raise exc.HTTPBadRequest(explanation=msg)
-
-                # For neutronv2, requestd_networks
+                # For neutronv2, requested_networks
                 # should be tuple of (network_uuid, fixed_ip, port_id)
                 if self._is_neutron_v2():
                     networks.append((network_uuid, address, port_id))
@@ -773,12 +774,12 @@ class ServersController(wsgi.Controller):
 
     def _validate_access_ipv4(self, address):
         if not utils.is_valid_ipv4(address):
-            expl = _('accessIPv4 is not proper IPv4 format')
+            expl = _('access_ip_v4 is not proper IPv4 format')
             raise exc.HTTPBadRequest(explanation=expl)
 
     def _validate_access_ipv6(self, address):
         if not utils.is_valid_ipv6(address):
-            expl = _('accessIPv6 is not proper IPv6 format')
+            expl = _('access_ip_v6 is not proper IPv6 format')
             raise exc.HTTPBadRequest(explanation=expl)
 
     @wsgi.serializers(xml=ServerTemplate)
@@ -864,18 +865,18 @@ class ServersController(wsgi.Controller):
             requested_networks = self._get_requested_networks(
                 requested_networks)
 
-        (access_ip_v4, ) = server_dict.get('accessIPv4'),
+        (access_ip_v4, ) = server_dict.get('access_ip_v4'),
         if access_ip_v4 is not None:
             self._validate_access_ipv4(access_ip_v4)
 
-        (access_ip_v6, ) = server_dict.get('accessIPv6'),
+        (access_ip_v6, ) = server_dict.get('access_ip_v6'),
         if access_ip_v6 is not None:
             self._validate_access_ipv6(access_ip_v6)
 
         try:
             flavor_id = self._flavor_id_from_req_data(body)
         except ValueError as error:
-            msg = _("Invalid flavorRef provided.")
+            msg = _("Invalid flavor_ref provided.")
             raise exc.HTTPBadRequest(explanation=msg)
 
         block_device_mapping = None
@@ -966,7 +967,7 @@ class ServersController(wsgi.Controller):
             msg = _("Can not find requested image")
             raise exc.HTTPBadRequest(explanation=msg)
         except exception.FlavorNotFound as error:
-            msg = _("Invalid flavorRef provided.")
+            msg = _("Invalid flavor_ref provided.")
             raise exc.HTTPBadRequest(explanation=msg)
         except exception.KeypairNotFound as error:
             msg = _("Invalid key_name provided.")
@@ -1000,7 +1001,7 @@ class ServersController(wsgi.Controller):
         server = self._view_builder.create(req, instances[0])
 
         if CONF.enable_instance_password:
-            server['server']['adminPass'] = password
+            server['server']['admin_pass'] = password
 
         robj = wsgi.ResponseObject(server)
 
@@ -1033,15 +1034,15 @@ class ServersController(wsgi.Controller):
             self._validate_server_name(name)
             update_dict['display_name'] = name.strip()
 
-        if 'accessIPv4' in body['server']:
-            access_ipv4 = body['server']['accessIPv4']
+        if 'access_ip_v4' in body['server']:
+            access_ipv4 = body['server']['access_ip_v4']
             if access_ipv4:
                 self._validate_access_ipv4(access_ipv4)
             update_dict['access_ip_v4'] = (
                 access_ipv4 and access_ipv4.strip() or None)
 
-        if 'accessIPv6' in body['server']:
-            access_ipv6 = body['server']['accessIPv6']
+        if 'access_ip_v6' in body['server']:
+            access_ipv6 = body['server']['access_ip_v6']
             if access_ipv6:
                 self._validate_access_ipv6(access_ipv6)
             update_dict['access_ip_v6'] = (
@@ -1052,8 +1053,8 @@ class ServersController(wsgi.Controller):
                     body['server']['auto_disk_config'])
             update_dict['auto_disk_config'] = auto_disk_config
 
-        if 'hostId' in body['server']:
-            msg = _("HostId cannot be updated.")
+        if 'host_id' in body['server']:
+            msg = _("host_id cannot be updated.")
             raise exc.HTTPBadRequest(explanation=msg)
 
         if 'personality' in body['server']:
@@ -1074,7 +1075,7 @@ class ServersController(wsgi.Controller):
     @wsgi.response(202)
     @wsgi.serializers(xml=FullServerTemplate)
     @wsgi.deserializers(xml=ActionDeserializer)
-    @wsgi.action('confirmResize')
+    @wsgi.action('confirm_resize')
     def _action_confirm_resize(self, req, id, body):
         context = req.environ['nova.context']
         instance = self._get_server(context, req, id)
@@ -1085,13 +1086,13 @@ class ServersController(wsgi.Controller):
             raise exc.HTTPBadRequest(explanation=msg)
         except exception.InstanceInvalidState as state_error:
             common.raise_http_conflict_for_instance_invalid_state(state_error,
-                    'confirmResize')
+                    'confirm_resize')
         return exc.HTTPNoContent()
 
     @wsgi.response(202)
     @wsgi.serializers(xml=FullServerTemplate)
     @wsgi.deserializers(xml=ActionDeserializer)
-    @wsgi.action('revertResize')
+    @wsgi.action('revert_resize')
     def _action_revert_resize(self, req, id, body):
         context = req.environ['nova.context']
         instance = self._get_server(context, req, id)
@@ -1105,7 +1106,7 @@ class ServersController(wsgi.Controller):
             raise exc.HTTPBadRequest(explanation=msg)
         except exception.InstanceInvalidState as state_error:
             common.raise_http_conflict_for_instance_invalid_state(state_error,
-                    'revertResize')
+                    'revert_resize')
         return webob.Response(status_int=202)
 
     @wsgi.response(202)
@@ -1179,9 +1180,9 @@ class ServersController(wsgi.Controller):
 
     def _image_ref_from_req_data(self, data):
         try:
-            return unicode(data['server']['imageRef'])
+            return unicode(data['server']['image_ref'])
         except (TypeError, KeyError):
-            msg = _("Missing imageRef attribute")
+            msg = _("Missing image_ref attribute")
             raise exc.HTTPBadRequest(explanation=msg)
 
     def _image_uuid_from_href(self, image_href):
@@ -1190,7 +1191,7 @@ class ServersController(wsgi.Controller):
         image_uuid = image_href.split('/').pop()
 
         if not uuidutils.is_uuid_like(image_uuid):
-            msg = _("Invalid imageRef provided.")
+            msg = _("Invalid image_ref provided.")
             raise exc.HTTPBadRequest(explanation=msg)
 
         return image_uuid
@@ -1203,7 +1204,7 @@ class ServersController(wsgi.Controller):
         If no image is supplied - checks to see if there is
         block devices set and proper extesions loaded.
         """
-        image_ref = data['server'].get('imageRef')
+        image_ref = data['server'].get('image_ref')
         bdm = data['server'].get('block_device_mapping')
 
         # TODO(cyeoh): bp v3-api-core-as-extensions
@@ -1221,34 +1222,12 @@ class ServersController(wsgi.Controller):
 
     def _flavor_id_from_req_data(self, data):
         try:
-            flavor_ref = data['server']['flavorRef']
+            flavor_ref = data['server']['flavor_ref']
         except (TypeError, KeyError):
-            msg = _("Missing flavorRef attribute")
+            msg = _("Missing flavor_ref attribute")
             raise exc.HTTPBadRequest(explanation=msg)
 
         return common.get_id_from_href(flavor_ref)
-
-    @wsgi.response(202)
-    @wsgi.serializers(xml=FullServerTemplate)
-    @wsgi.deserializers(xml=ActionDeserializer)
-    @wsgi.action('changePassword')
-    def _action_change_password(self, req, id, body):
-        context = req.environ['nova.context']
-        if (not 'changePassword' in body
-                or 'adminPass' not in body['changePassword']):
-            msg = _("No adminPass was specified")
-            raise exc.HTTPBadRequest(explanation=msg)
-        password = body['changePassword']['adminPass']
-        if not isinstance(password, basestring):
-            msg = _("Invalid adminPass")
-            raise exc.HTTPBadRequest(explanation=msg)
-        server = self._get_server(context, req, id)
-        try:
-            self.compute_api.set_admin_password(context, server, password)
-        except NotImplementedError:
-            msg = _("Unable to set password on instance")
-            raise exc.HTTPNotImplemented(explanation=msg)
-        return webob.Response(status_int=202)
 
     def _validate_metadata(self, metadata):
         """Ensure that we can work with the metadata given."""
@@ -1266,12 +1245,12 @@ class ServersController(wsgi.Controller):
     def _action_resize(self, req, id, body):
         """Resizes a given instance to the flavor size requested."""
         try:
-            flavor_ref = str(body["resize"]["flavorRef"])
+            flavor_ref = str(body["resize"]["flavor_ref"])
             if not flavor_ref:
-                msg = _("Resize request has invalid 'flavorRef' attribute.")
+                msg = _("Resize request has invalid 'flavor_ref' attribute.")
                 raise exc.HTTPBadRequest(explanation=msg)
         except (KeyError, TypeError):
-            msg = _("Resize requests require 'flavorRef' attribute.")
+            msg = _("Resize requests require 'flavor_ref' attribute.")
             raise exc.HTTPBadRequest(explanation=msg)
 
         kwargs = {}
@@ -1293,15 +1272,15 @@ class ServersController(wsgi.Controller):
             raise exc.HTTPBadRequest(explanation=msg)
 
         try:
-            image_href = body["imageRef"]
+            image_href = body["image_ref"]
         except (KeyError, TypeError):
-            msg = _("Could not parse imageRef from request.")
+            msg = _("Could not parse image_ref from request.")
             raise exc.HTTPBadRequest(explanation=msg)
 
         image_href = self._image_uuid_from_href(image_href)
 
         try:
-            password = body['adminPass']
+            password = body['admin_pass']
         except (KeyError, TypeError):
             password = utils.generate_password()
 
@@ -1311,17 +1290,17 @@ class ServersController(wsgi.Controller):
         attr_map = {
             'personality': 'files_to_inject',
             'name': 'display_name',
-            'accessIPv4': 'access_ip_v4',
-            'accessIPv6': 'access_ip_v6',
+            'access_ip_v4': 'access_ip_v4',
+            'access_ip_v6': 'access_ip_v6',
             'metadata': 'metadata',
             'auto_disk_config': 'auto_disk_config',
         }
 
-        if 'accessIPv4' in body:
-            self._validate_access_ipv4(body['accessIPv4'])
+        if 'access_ip_v4' in body:
+            self._validate_access_ipv4(body['access_ip_v4'])
 
-        if 'accessIPv6' in body:
-            self._validate_access_ipv6(body['accessIPv6'])
+        if 'access_ip_v6' in body:
+            self._validate_access_ipv6(body['access_ip_v6'])
 
         if 'name' in body:
             self._validate_server_name(body['name'])
@@ -1368,10 +1347,10 @@ class ServersController(wsgi.Controller):
 
         view = self._view_builder.show(req, instance)
 
-        # Add on the adminPass attribute since the view doesn't do it
+        # Add on the admin_pass attribute since the view doesn't do it
         # unless instance passwords are disabled
         if CONF.enable_instance_password:
-            view['server']['adminPass'] = password
+            view['server']['admin_pass'] = password
 
         robj = wsgi.ResponseObject(view)
         return self._add_location(robj)
@@ -1379,17 +1358,17 @@ class ServersController(wsgi.Controller):
     @wsgi.response(202)
     @wsgi.serializers(xml=FullServerTemplate)
     @wsgi.deserializers(xml=ActionDeserializer)
-    @wsgi.action('createImage')
+    @wsgi.action('create_image')
     @common.check_snapshots_enabled
     def _action_create_image(self, req, id, body):
         """Snapshot a server instance."""
         context = req.environ['nova.context']
-        entity = body.get("createImage", {})
+        entity = body.get("create_image", {})
 
         image_name = entity.get("name")
 
         if not image_name:
-            msg = _("createImage entity requires name attribute")
+            msg = _("create_image entity requires name attribute")
             raise exc.HTTPBadRequest(explanation=msg)
 
         props = {}
@@ -1425,7 +1404,7 @@ class ServersController(wsgi.Controller):
                                                   extra_properties=props)
         except exception.InstanceInvalidState as state_error:
             common.raise_http_conflict_for_instance_invalid_state(state_error,
-                        'createImage')
+                        'create_image')
         except exception.Invalid as err:
             raise exc.HTTPBadRequest(explanation=err.format_message())
 
@@ -1443,12 +1422,12 @@ class ServersController(wsgi.Controller):
     def _get_server_admin_password(self, server):
         """Determine the admin password for a server on creation."""
         try:
-            password = server['adminPass']
+            password = server['admin_pass']
             self._validate_admin_password(password)
         except KeyError:
             password = utils.generate_password()
         except ValueError:
-            raise exc.HTTPBadRequest(explanation=_("Invalid adminPass"))
+            raise exc.HTTPBadRequest(explanation=_("Invalid admin_pass"))
 
         return password
 
@@ -1459,7 +1438,7 @@ class ServersController(wsgi.Controller):
     def _get_server_search_options(self):
         """Return server search options allowed by non-admin."""
         return ('reservation_id', 'name', 'status', 'image', 'flavor',
-                'ip', 'changes-since', 'all_tenants')
+                'ip', 'changes_since', 'all_tenants')
 
     def _server_create_xml_deserialize_extension_point(self, ext, server_node,
                                                        server_dict):

@@ -32,6 +32,7 @@ from nova.openstack.common import jsonutils
 from nova.openstack.common import rpc
 from nova import test
 from nova.tests.api.openstack import fakes
+from nova.tests import fake_instance
 from nova.tests.image import fake
 
 
@@ -68,8 +69,8 @@ class SchedulerHintsTestCase(test.TestCase):
         req.content_type = 'application/json'
         body = {'server': {
                   'name': 'server_test',
-                  'imageRef': 'cedef40a-ed67-4d10-800e-17455edce175',
-                  'flavorRef': '1',
+                  'image_ref': 'cedef40a-ed67-4d10-800e-17455edce175',
+                  'flavor_ref': '1',
                }}
 
         req.body = jsonutils.dumps(body)
@@ -90,8 +91,8 @@ class SchedulerHintsTestCase(test.TestCase):
         body = {
             'server': {
                   'name': 'server_test',
-                  'imageRef': 'cedef40a-ed67-4d10-800e-17455edce175',
-                  'flavorRef': '1',
+                  'image_ref': 'cedef40a-ed67-4d10-800e-17455edce175',
+                  'flavor_ref': '1',
             },
             'os-scheduler-hints:scheduler_hints': {'a': 'b'},
         }
@@ -107,8 +108,8 @@ class SchedulerHintsTestCase(test.TestCase):
         body = {
             'server': {
                   'name': 'server_test',
-                  'imageRef': 'cedef40a-ed67-4d10-800e-17455edce175',
-                  'flavorRef': '1',
+                  'image_ref': 'cedef40a-ed67-4d10-800e-17455edce175',
+                  'flavor_ref': '1',
             },
             'os-scheduler-hints:scheduler_hints': 'here',
         }
@@ -142,7 +143,7 @@ class ServersControllerCreateTest(test.TestCase):
             image_uuid = '76fa36fc-c930-4bf3-8c8a-ea2a2420deb6'
             def_image_ref = 'http://localhost/images/%s' % image_uuid
             self.instance_cache_num += 1
-            instance = {
+            instance = fake_instance.fake_db_instance(**{
                 'id': self.instance_cache_num,
                 'display_name': inst['display_name'] or 'test',
                 'uuid': FAKE_UUID,
@@ -160,7 +161,7 @@ class ServersControllerCreateTest(test.TestCase):
                 "fixed_ips": [],
                 "task_state": "",
                 "vm_state": "",
-            }
+            })
 
             self.instance_cache_by_id[instance['id']] = instance
             self.instance_cache_by_uuid[instance['uuid']] = instance
@@ -228,9 +229,9 @@ class ServersControllerCreateTest(test.TestCase):
     def _test_create_extra(self, params, no_image=False,
                            override_controller=None):
         image_uuid = 'c905cedb-7281-47e4-8a62-f26bc5fc4c77'
-        server = dict(name='server_test', imageRef=image_uuid, flavorRef=2)
+        server = dict(name='server_test', image_ref=image_uuid, flavor_ref=2)
         if no_image:
-            server.pop('imageRef', None)
+            server.pop('image_ref', None)
         server.update(params)
         body = dict(server=server)
         req = fakes.HTTPRequestV3.blank('/servers')
@@ -281,8 +282,8 @@ class TestServerCreateRequestXMLDeserializer(test.TestCase):
         serial_request = """
 <ns2:server xmlns:ns2="http://docs.openstack.org/compute/api/v3"
      name="new-server-test"
-     imageRef="1"
-     flavorRef="2">
+     image_ref="1"
+     flavor_ref="2">
      <ns2:metadata><ns2:meta key="hello">world</ns2:meta></ns2:metadata>
      <os:scheduler_hints
      xmlns:os="http://docs.openstack.org/compute/ext/scheduler-hints/api/v3">
@@ -299,8 +300,8 @@ class TestServerCreateRequestXMLDeserializer(test.TestCase):
                     'near': ['eb999657-dd6b-464e-8713-95c532ac3b18']
                 },
                 "name": "new-server-test",
-                "imageRef": "1",
-                "flavorRef": "2",
+                "image_ref": "1",
+                "flavor_ref": "2",
                 "metadata": {
                     "hello": "world"
                 }

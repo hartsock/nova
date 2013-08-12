@@ -74,6 +74,9 @@ class CellsAPI(rpc_proxy.RpcProxy):
         1.14 - Adds reboot_instance()
         1.15 - Adds suspend_instance() and resume_instance()
         1.16 - Adds instance_update_from_api()
+        1.17 - Adds get_host_uptime()
+        1.18 - Adds terminate_instance() and soft_delete_instance()
+        1.19 - Adds pause_instance() and unpause_instance()
     '''
     BASE_RPC_API_VERSION = '1.0'
 
@@ -224,6 +227,14 @@ class CellsAPI(rpc_proxy.RpcProxy):
         return self.call(ctxt, self.make_msg('service_get_by_compute_host',
                                              host_name=host_name),
                          version='1.2')
+
+    def get_host_uptime(self, context, host_name):
+        """Gets the host uptime in a particular cell. The cell name should
+        be encoded within the host_name
+        """
+        return self.call(context, self.make_msg('get_host_uptime',
+                                                host_name=host_name),
+                         version='1.17')
 
     def service_update(self, ctxt, host_name, binary, params_to_update):
         """
@@ -440,6 +451,28 @@ class CellsAPI(rpc_proxy.RpcProxy):
                                 reboot_type=reboot_type),
                   version='1.14')
 
+    def pause_instance(self, ctxt, instance):
+        """Pause an instance in its cell.
+
+        This method takes a new-world instance object.
+        """
+        if not CONF.cells.enable:
+            return
+        self.cast(ctxt,
+                  self.make_msg('pause_instance', instance=instance),
+                  version='1.19')
+
+    def unpause_instance(self, ctxt, instance):
+        """Unpause an instance in its cell.
+
+        This method takes a new-world instance object.
+        """
+        if not CONF.cells.enable:
+            return
+        self.cast(ctxt,
+                  self.make_msg('unpause_instance', instance=instance),
+                  version='1.19')
+
     def suspend_instance(self, ctxt, instance):
         """Suspend an instance in its cell.
 
@@ -461,3 +494,25 @@ class CellsAPI(rpc_proxy.RpcProxy):
         self.cast(ctxt,
                   self.make_msg('resume_instance', instance=instance),
                   version='1.15')
+
+    def terminate_instance(self, ctxt, instance, bdms, reservations=None):
+        """Delete an instance in its cell.
+
+        This method takes a new-world instance object.
+        """
+        if not CONF.cells.enable:
+            return
+        self.cast(ctxt,
+                  self.make_msg('terminate_instance', instance=instance),
+                  version='1.18')
+
+    def soft_delete_instance(self, ctxt, instance, reservations=None):
+        """Soft-delete an instance in its cell.
+
+        This method takes a new-world instance object.
+        """
+        if not CONF.cells.enable:
+            return
+        self.cast(ctxt,
+                  self.make_msg('soft_delete_instance', instance=instance),
+                  version='1.18')

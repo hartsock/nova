@@ -30,12 +30,12 @@ import netaddr
 from oslo.config import cfg
 
 from nova import block_device
+from nova import compute
 from nova.compute import flavors
 from nova.compute import power_state
 from nova.compute import task_states
 from nova.compute import vm_mode
 from nova.compute import vm_states
-from nova import conductor
 from nova import context as nova_context
 from nova import exception
 from nova.openstack.common import excutils
@@ -66,8 +66,8 @@ xenapi_vmops_opts = [
                default='nova.virt.xenapi.vif.XenAPIBridgeDriver',
                help='The XenAPI VIF driver using XenServer Network APIs.'),
     cfg.StrOpt('xenapi_image_upload_handler',
-                default='nova.virt.xenapi.imageupload.glance.GlanceStore',
-                help='Object Store Driver used to handle image uploads.'),
+                default='nova.virt.xenapi.image.glance.GlanceStore',
+                help='Dom0 plugin driver used to handle image uploads.'),
     ]
 
 CONF = cfg.CONF
@@ -113,7 +113,7 @@ def cmp_version(a, b):
     return len(a) - len(b)
 
 
-def make_step_decorator(context, instance, instance_update):
+def make_step_decorator(context, instance, update_instance_progress):
     """Factory to create a decorator that records instance progress as a series
     of discrete steps.
 
@@ -141,10 +141,8 @@ def make_step_decorator(context, instance, instance_update):
 
     def bump_progress():
         step_info['current'] += 1
-        progress = round(float(step_info['current']) /
-                         step_info['total'] * 100)
-        LOG.debug(_("Updating progress to %d"), progress, instance=instance)
-        instance_update(context, instance['uuid'], {'progress': progress})
+        update_instance_progress(context, instance,
+                                 step_info['current'], step_info['total'])
 
     def step_decorator(f):
         step_info['total'] += 1
@@ -165,7 +163,7 @@ class VMOps(object):
     Management class for VM-related tasks
     """
     def __init__(self, session, virtapi):
-        self.conductor_api = conductor.API()
+        self.compute_api = compute.API()
         self._session = session
         self._virtapi = virtapi
         self._volumeops = volumeops.VolumeOps(self._session)
@@ -181,6 +179,24 @@ class VMOps(object):
                   CONF.xenapi_image_upload_handler)
         self.image_upload_handler = importutils.import_object(
                                 CONF.xenapi_image_upload_handler)
+
+    def _create_kernel_and_ramdisk(self, instance, context, name_label):
+        kernel_file = None
+        ramdisk_file = None
+
+        if instance['kernel_id']:
+            vdis = vm_utils.create_kernel_image(context, self._session,
+                    instance, name_label, instance['kernel_id'],
+                    vm_utils.ImageType.KERNEL)
+            kernel_file = vdis['kernel'].get('file')
+
+        if instance['ramdisk_id']:
+            vdis = vm_utils.create_kernel_image(context, self._session,
+                    instance, name_label, instance['ramdisk_id'],
+                    vm_utils.ImageType.RAMDISK)
+            ramdisk_file = vdis['ramdisk'].get('file')
+
+        return (kernel_file, ramdisk_file)
 
     def agent_enabled(self, instance):
         if CONF.xenapi_disable_agent:
@@ -277,21 +293,10 @@ class VMOps(object):
         if resize_instance:
             self._resize_instance(instance, root_vdi)
 
-        # Check if kernel and ramdisk are external
-        kernel_file = None
-        ramdisk_file = None
-
         name_label = instance['name']
-        if instance['kernel_id']:
-            vdis = vm_utils.create_kernel_image(context, self._session,
-                        instance, name_label, instance['kernel_id'],
-                        vm_utils.ImageType.KERNEL)
-            kernel_file = vdis['kernel'].get('file')
-        if instance['ramdisk_id']:
-            vdis = vm_utils.create_kernel_image(context, self._session,
-                        instance, name_label, instance['ramdisk_id'],
-                        vm_utils.ImageType.RAMDISK)
-            ramdisk_file = vdis['ramdisk'].get('file')
+
+        kernel_file, ramdisk_file = self._create_kernel_and_ramdisk(
+            instance, context, name_label)
 
         disk_image_type = vm_utils.determine_disk_image_type(image_meta)
         vm_ref = self._create_vm(context, instance, instance['name'],
@@ -358,7 +363,7 @@ class VMOps(object):
             name_label = instance['name']
 
         step = make_step_decorator(context, instance,
-                                   self._virtapi.instance_update)
+                                   self._update_instance_progress)
 
         @step
         def determine_disk_image_type_step(undo_mgr):
@@ -380,20 +385,8 @@ class VMOps(object):
 
         @step
         def create_kernel_ramdisk_step(undo_mgr):
-            kernel_file = None
-            ramdisk_file = None
-
-            if instance['kernel_id']:
-                vdis = vm_utils.create_kernel_image(context, self._session,
-                        instance, name_label, instance['kernel_id'],
-                        vm_utils.ImageType.KERNEL)
-                kernel_file = vdis['kernel'].get('file')
-
-            if instance['ramdisk_id']:
-                vdis = vm_utils.create_kernel_image(context, self._session,
-                        instance, name_label, instance['ramdisk_id'],
-                        vm_utils.ImageType.RAMDISK)
-                ramdisk_file = vdis['ramdisk'].get('file')
+            kernel_file, ramdisk_file = self._create_kernel_and_ramdisk(
+                instance, context, name_label)
 
             def undo_create_kernel_ramdisk():
                 if kernel_file or ramdisk_file:
@@ -823,7 +816,7 @@ class VMOps(object):
     def _migrate_disk_resizing_down(self, context, instance, dest,
                                     instance_type, vm_ref, sr_path):
         step = make_step_decorator(context, instance,
-                                   self._virtapi.instance_update)
+                                   self._update_instance_progress)
 
         @step
         def fake_step_to_match_resizing_up():
@@ -1398,7 +1391,7 @@ class VMOps(object):
 
         for instance in instances:
             LOG.info(_("Automatically hard rebooting"), instance=instance)
-            self.conductor_api.compute_reboot(ctxt, instance, "HARD")
+            self.compute_api.reboot(ctxt, instance, "HARD")
 
     def get_info(self, instance, vm_ref=None):
         """Return data about VM instance."""
@@ -1666,7 +1659,6 @@ class VMOps(object):
                           {'method': method, 'args': args, 'e': e},
                           instance=instance)
                 return {'returncode': 'error', 'message': err_msg}
-            return None
 
     def _get_dom_id(self, instance=None, vm_ref=None, check_rescue=False):
         vm_ref = vm_ref or self._get_vm_opaque_ref(instance, check_rescue)

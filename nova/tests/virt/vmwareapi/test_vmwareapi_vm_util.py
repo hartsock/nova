@@ -17,8 +17,10 @@
 #    under the License.
 
 from collections import namedtuple
+import re
 
 from nova import exception
+from nova.openstack.common.gettextutils import _
 from nova import test
 from nova.virt.vmwareapi import fake
 from nova.virt.vmwareapi import vm_util
@@ -42,12 +44,57 @@ class VMwareVMUtilTestCase(test.TestCase):
         fake.reset()
 
     def test_get_datastore_ref_and_name(self):
+        fake_objects = fake.FakeRetrieveResult()
+        fake_objects.add_object(fake.Datastore())
         result = vm_util.get_datastore_ref_and_name(
-            fake_session([fake.Datastore()]))
+            fake_session(fake_objects))
 
         self.assertEquals(result[1], "fake-ds")
         self.assertEquals(result[2], 1024 * 1024 * 1024 * 1024)
         self.assertEquals(result[3], 1024 * 1024 * 500 * 1024)
+
+    def test_get_datastore_ref_and_name_with_regex(self):
+        # Test with a regex that matches with a datastore
+        datastore_valid_regex = re.compile("^openstack.*\d$")
+        fake_objects = fake.FakeRetrieveResult()
+        fake_objects.add_object(fake.Datastore("openstack-ds0"))
+        fake_objects.add_object(fake.Datastore("fake-ds0"))
+        fake_objects.add_object(fake.Datastore("fake-ds1"))
+        result = vm_util.get_datastore_ref_and_name(
+            fake_session(fake_objects), None, None, datastore_valid_regex)
+        self.assertEquals("openstack-ds0", result[1])
+
+    def test_get_datastore_ref_and_name_with_list(self):
+        # Test with a regex containing whitelist of datastores
+        datastore_valid_regex = re.compile("(openstack-ds0|openstack-ds2)")
+        fake_objects = fake.FakeRetrieveResult()
+        fake_objects.add_object(fake.Datastore("openstack-ds0"))
+        fake_objects.add_object(fake.Datastore("openstack-ds1"))
+        fake_objects.add_object(fake.Datastore("openstack-ds2"))
+        result = vm_util.get_datastore_ref_and_name(
+            fake_session(fake_objects), None, None, datastore_valid_regex)
+        self.assertNotEquals("openstack-ds1", result[1])
+
+    def test_get_datastore_ref_and_name_with_regex_error(self):
+        # Test with a regex that has no match
+        # Checks if code raises DatastoreNotFound with a specific message
+        datastore_invalid_regex = re.compile("unknown-ds")
+        exp_message = (_("Datastore regex %s did not match any datastores")
+                       % datastore_invalid_regex.pattern)
+        fake_objects = fake.FakeRetrieveResult()
+        fake_objects.add_object(fake.Datastore("fake-ds0"))
+        fake_objects.add_object(fake.Datastore("fake-ds1"))
+        # assertRaisesRegExp would have been a good choice instead of
+        # try/catch block, but it's available only from Py 2.7.
+        try:
+            vm_util.get_datastore_ref_and_name(
+                fake_session(fake_objects), None, None,
+                datastore_invalid_regex)
+        except exception.DatastoreNotFound as e:
+            self.assertEquals(exp_message, e.args[0])
+        else:
+            self.fail("DatastoreNotFound Exception was not raised with "
+                      "message: %s" % exp_message)
 
     def test_get_datastore_ref_and_name_without_datastore(self):
 
@@ -66,9 +113,10 @@ class VMwareVMUtilTestCase(test.TestCase):
 
         fake_host_id = fake_host_sys.obj.value
         fake_host_name = "ha-host"
-
+        fake_objects = fake.FakeRetrieveResult()
+        fake_objects.add_object(fake_host_sys)
         ref = vm_util.get_host_ref_from_id(
-            fake_session([fake_host_sys]), fake_host_id, ['name'])
+            fake_session(fake_objects), fake_host_id, ['name'])
 
         self.assertIsInstance(ref, fake.HostSystem)
         self.assertEqual(fake_host_id, ref.obj.value)
@@ -84,9 +132,11 @@ class VMwareVMUtilTestCase(test.TestCase):
                 "vm-123", "VirtualMachine"))
         fake_vm.propSet.append(
             fake.Property('name', 'vm-123'))
+        fake_objects = fake.FakeRetrieveResult()
+        fake_objects.add_object(fake_vm)
 
         vm_ref = vm_util.get_vm_ref_from_name(
-                fake_session([fake_vm]), 'vm-123')
+                fake_session(fake_objects), 'vm-123')
 
         self.assertIsNotNone(vm_ref)
 
@@ -98,8 +148,12 @@ class VMwareVMUtilTestCase(test.TestCase):
                                 'host-123', 'HostSystem'))
                 ])]
 
+        fake_objects = fake.FakeRetrieveResult()
+        for results in fake_results:
+            fake_objects.add_object(results)
+
         host_id = vm_util.get_host_id_from_vm_ref(
-            fake_session(fake_results), vm_ref)
+            fake_session(fake_objects), vm_ref)
 
         self.assertEqual('host-123', host_id)
 
@@ -109,6 +163,7 @@ class VMwareVMUtilTestCase(test.TestCase):
         DynamicProperty = namedtuple('Property', ['name', 'val'])
         MoRef = namedtuple('Val', ['value'])
 
+        good_objects = fake.FakeRetrieveResult()
         results_good = [
             ObjectContent(propSet=[
                 DynamicProperty(name='name', val=MoRef(value='vm-123'))]),
@@ -121,7 +176,10 @@ class VMwareVMUtilTestCase(test.TestCase):
             ObjectContent(propSet=[
                 DynamicProperty(
                     name='something', val=MoRef(value='thing'))]), ]
+        for result in results_good:
+            good_objects.add_object(result)
 
+        bad_objects = fake.FakeRetrieveResult()
         results_bad = [
             ObjectContent(propSet=[
                 DynamicProperty(name='name', val=MoRef(value='vm-123'))]),
@@ -131,22 +189,24 @@ class VMwareVMUtilTestCase(test.TestCase):
             ObjectContent(propSet=[
                 DynamicProperty(
                     name='something', val=MoRef(value='thing'))]), ]
+        for result in results_bad:
+            bad_objects.add_object(result)
 
         prop = vm_util.property_from_property_set(
-                    'runtime.host', results_good)
+                    'runtime.host', good_objects)
         self.assertIsNotNone(prop)
         value = prop.val.value
         self.assertEqual('host-123', value)
 
         prop2 = vm_util.property_from_property_set(
-                    'runtime.host', results_bad)
+                    'runtime.host', bad_objects)
         self.assertIsNone(prop2)
 
-        prop3 = vm_util.property_from_property_set('foo', results_good)
+        prop3 = vm_util.property_from_property_set('foo', good_objects)
         self.assertIsNotNone(prop3)
         val3 = prop3.val.value
         self.assertEqual('bar1', val3)
 
-        prop4 = vm_util.property_from_property_set('foo', results_bad)
+        prop4 = vm_util.property_from_property_set('foo', bad_objects)
         self.assertIsNotNone(prop4)
         self.assertEqual('bar1', prop4.val)

@@ -25,6 +25,7 @@ from nova import db
 from nova import exception
 from nova.objects import base as objects_base
 from nova.objects import instance as instance_obj
+from nova.openstack.common import jsonutils
 from nova.openstack.common import rpc
 from nova.openstack.common import timeutils
 from nova.openstack.common import uuidutils
@@ -640,6 +641,7 @@ class CellsTargetedMethodsTestCase(test.TestCase):
         methods_cls = self.tgt_msg_runner.methods_by_type['targeted']
         self.tgt_methods_cls = methods_cls
         self.tgt_compute_api = methods_cls.compute_api
+        self.tgt_host_api = methods_cls.host_api
         self.tgt_db_inst = methods_cls.db
         self.tgt_c_rpcapi = methods_cls.compute_rpcapi
 
@@ -991,7 +993,7 @@ class CellsTargetedMethodsTestCase(test.TestCase):
                                                    self.tgt_cell_name,
                                                    'fake-uuid')
         result = response.value_or_raise()
-        self.assertEqual([fake_act], result)
+        self.assertEqual([jsonutils.to_primitive(fake_act)], result)
 
     def test_action_get_by_request_id(self):
         fake_uuid = fake_instance_actions.FAKE_UUID
@@ -1006,7 +1008,7 @@ class CellsTargetedMethodsTestCase(test.TestCase):
         response = self.src_msg_runner.action_get_by_request_id(self.ctxt,
                 self.tgt_cell_name, 'fake-uuid', 'req-fake')
         result = response.value_or_raise()
-        self.assertEqual(fake_act, result)
+        self.assertEqual(jsonutils.to_primitive(fake_act), result)
 
     def test_action_events_get(self):
         fake_action_id = fake_instance_actions.FAKE_ACTION_ID1
@@ -1021,7 +1023,7 @@ class CellsTargetedMethodsTestCase(test.TestCase):
                                                          self.tgt_cell_name,
                                                          'fake-action')
         result = response.value_or_raise()
-        self.assertEqual(fake_events, result)
+        self.assertEqual(jsonutils.to_primitive(fake_events), result)
 
     def test_validate_console_port(self):
         instance_uuid = 'fake_instance_uuid'
@@ -1169,8 +1171,13 @@ class CellsTargetedMethodsTestCase(test.TestCase):
         meth_cls = self.tgt_methods_cls
         self.mox.StubOutWithMock(meth_cls, '_call_compute_api_with_obj')
 
+        method_corrections = {
+            'terminate': 'delete',
+            }
+        api_method = method_corrections.get(method, method)
+
         meth_cls._call_compute_api_with_obj(
-                self.ctxt, 'fake-instance', method,
+                self.ctxt, 'fake-instance', api_method,
                 *expected_args, **expected_kwargs).AndReturn('meow')
 
         self.mox.ReplayAll()
@@ -1201,6 +1208,34 @@ class CellsTargetedMethodsTestCase(test.TestCase):
 
     def test_resume_instance(self):
         self._test_instance_action_method('resume', (), {}, (), {}, False)
+
+    def test_get_host_uptime(self):
+        host_name = "fake-host"
+        host_uptime = (" 08:32:11 up 93 days, 18:25, 12 users,  load average:"
+                       " 0.20, 0.12, 0.14")
+        self.mox.StubOutWithMock(self.tgt_host_api, 'get_host_uptime')
+        self.tgt_host_api.get_host_uptime(self.ctxt, host_name).\
+            AndReturn(host_uptime)
+        self.mox.ReplayAll()
+        response = self.src_msg_runner.get_host_uptime(self.ctxt,
+                                                       self.tgt_cell_name,
+                                                       host_name)
+        expected_host_uptime = response.value_or_raise()
+        self.assertEqual(host_uptime, expected_host_uptime)
+
+    def test_terminate_instance(self):
+        self._test_instance_action_method('terminate',
+                                          (), {}, (), {}, False)
+
+    def test_soft_delete_instance(self):
+        self._test_instance_action_method('soft_delete',
+                                          (), {}, (), {}, False)
+
+    def test_pause_instance(self):
+        self._test_instance_action_method('pause', (), {}, (), {}, False)
+
+    def test_unpause_instance(self):
+        self._test_instance_action_method('unpause', (), {}, (), {}, False)
 
 
 class CellsBroadcastMethodsTestCase(test.TestCase):

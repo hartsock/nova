@@ -313,7 +313,7 @@
 
 # whether to use per-user rate limiting for the api. (boolean
 # value)
-#api_rate_limit=true
+#api_rate_limit=false
 
 # The strategy to use for auth: noauth or keystone. (string
 # value)
@@ -385,6 +385,9 @@
 # drive (string value)
 #config_drive_skip_versions=1.0 2007-01-19 2007-03-01 2007-08-29 2007-10-10 2007-12-15 2008-02-01 2008-09-01
 
+# Driver to use for vendor data (string value)
+#vendordata_driver=nova.api.metadata.vendordata_json.JsonFileVendorData
+
 
 #
 # Options defined in nova.api.metadata.handler
@@ -397,6 +400,14 @@
 # Shared secret to validate proxies Neutron metadata requests
 # (string value)
 #neutron_metadata_proxy_shared_secret=
+
+
+#
+# Options defined in nova.api.metadata.vendordata_json
+#
+
+# File to load json formated vendor data from (string value)
+#vendordata_jsonfile_path=<None>
 
 
 #
@@ -676,6 +687,10 @@
 # (integer value)
 #network_allocate_retries=0
 
+# The number of times to attempt to reap an instance's files.
+# (integer value)
+#maximum_instance_delete_attempts=5
+
 # interval to pull bandwidth usage info (integer value)
 #bandwidth_poll_interval=600
 
@@ -711,6 +726,10 @@
 # removing from a host.  -1 never offload, 0 offload when
 # shelved (integer value)
 #shelved_offload_time=0
+
+# Interval in seconds for retrying failed instance file
+# deletes (integer value)
+#instance_delete_interval=300
 
 # Action to take if a running deleted instance is
 # detected.Valid options are 'noop', 'log' and 'reap'. Set to
@@ -917,7 +936,7 @@
 # value)
 #image_decryption_dir=/tmp
 
-# hostname or ip for openstack to use when accessing the s3
+# hostname or ip for OpenStack to use when accessing the s3
 # api (string value)
 #s3_host=$my_ip
 
@@ -1266,6 +1285,10 @@
 # (integer value)
 #neutron_extension_sync_interval=600
 
+# Location of ca certicates file to use for neutronclient
+# requests. (string value)
+#neutron_ca_certificates_file=<None>
+
 
 #
 # Options defined in nova.network.rpcapi
@@ -1335,8 +1358,7 @@
 # Whether to disable inter-process locks (boolean value)
 #disable_process_locking=false
 
-# Directory to use for lock files. Default to a temp directory
-# (string value)
+# Directory to use for lock files. (string value)
 #lock_path=<None>
 
 
@@ -1450,7 +1472,7 @@
 # Options defined in nova.openstack.common.notifier.rpc_notifier
 #
 
-# AMQP topic used for openstack notifications (list value)
+# AMQP topic used for OpenStack notifications (list value)
 #notification_topics=notifications
 
 
@@ -2223,6 +2245,40 @@
 
 
 #
+# Options defined in nova.virt.xenapi.image.bittorrent
+#
+
+# Base URL for torrent files. (string value)
+#xenapi_torrent_base_url=<None>
+
+# Probability that peer will become a seeder. (1.0 = 100%)
+# (floating point value)
+#xenapi_torrent_seed_chance=1.0
+
+# Number of seconds after downloading an image via BitTorrent
+# that it should be seeded for other peers. (integer value)
+#xenapi_torrent_seed_duration=3600
+
+# Cached torrent files not accessed within this number of
+# seconds can be reaped (integer value)
+#xenapi_torrent_max_last_accessed=86400
+
+# Beginning of port range to listen on (integer value)
+#xenapi_torrent_listen_port_start=6881
+
+# End of port range to listen on (integer value)
+#xenapi_torrent_listen_port_end=6891
+
+# Number of seconds a download can remain at the same progress
+# percentage w/o being considered a stall (integer value)
+#xenapi_torrent_download_stall_cutoff=600
+
+# Maximum number of seeder processes to run concurrently
+# within a given dom0. (-1 = no limit) (integer value)
+#xenapi_torrent_max_seeder_processes_per_host=1
+
+
+#
 # Options defined in nova.virt.xenapi.pool
 #
 
@@ -2261,13 +2317,14 @@
 #max_kernel_ramdisk_size=16777216
 
 # Filter for finding the SR to be used to install guest
-# instances on. The default value is the Local Storage in
-# default XenServer/XCP installations. To select an SR with a
-# different matching criteria, you could set it to other-
+# instances on. To use the Local Storage in default
+# XenServer/XCP installations set this flag to other-config
+# :i18n-key=local-storage. To select an SR with a different
+# matching criteria, you could set it to other-
 # config:my_favorite_sr=true. On the other hand, to fall back
 # on the Default SR, as displayed by XenCenter, set this flag
 # to: default-sr:true (string value)
-#sr_matching_filter=other-config:i18n-key=local-storage
+#sr_matching_filter=default-sr:true
 
 # Whether to use sparse_copy for copying data on a resize down
 # (False will use standard dd). This speeds up resizes down
@@ -2282,35 +2339,6 @@
 # (all|some|none). (string value)
 #xenapi_torrent_images=none
 
-# Base URL for torrent files. (string value)
-#xenapi_torrent_base_url=<None>
-
-# Probability that peer will become a seeder. (1.0 = 100%)
-# (floating point value)
-#xenapi_torrent_seed_chance=1.0
-
-# Number of seconds after downloading an image via BitTorrent
-# that it should be seeded for other peers. (integer value)
-#xenapi_torrent_seed_duration=3600
-
-# Cached torrent files not accessed within this number of
-# seconds can be reaped (integer value)
-#xenapi_torrent_max_last_accessed=86400
-
-# Beginning of port range to listen on (integer value)
-#xenapi_torrent_listen_port_start=6881
-
-# End of port range to listen on (integer value)
-#xenapi_torrent_listen_port_end=6891
-
-# Number of seconds a download can remain at the same progress
-# percentage w/o being considered a stall (integer value)
-#xenapi_torrent_download_stall_cutoff=600
-
-# Maximum number of seeder processes to run concurrently
-# within a given dom0. (-1 = no limit) (integer value)
-#xenapi_torrent_max_seeder_processes_per_host=1
-
 
 #
 # Options defined in nova.virt.xenapi.vmops
@@ -2324,9 +2352,9 @@
 # value)
 #xenapi_vif_driver=nova.virt.xenapi.vif.XenAPIBridgeDriver
 
-# Object Store Driver used to handle image uploads. (string
+# Dom0 plugin driver used to handle image uploads. (string
 # value)
-#xenapi_image_upload_handler=nova.virt.xenapi.imageupload.glance.GlanceStore
+#xenapi_image_upload_handler=nova.virt.xenapi.image.glance.GlanceStore
 
 
 #
@@ -2425,6 +2453,14 @@
 
 
 #
+# Options defined in nova.virt.hyperv.utilsfactory
+#
+
+# Force V1 volume utility class (boolean value)
+#force_volumeutils_v1=false
+
+
+#
 # Options defined in nova.virt.hyperv.vif
 #
 
@@ -2465,9 +2501,6 @@
 # Interval between volume attachment attempts, in seconds
 # (integer value)
 #volume_attach_retry_interval=5
-
-# Force volumeutils v1 (boolean value)
-#force_volumeutils_v1=false
 
 
 [osapi_v3]
@@ -2728,6 +2761,18 @@
 #sg_retry_interval=5
 
 
+[image_file_url]
+
+#
+# Options defined in nova.image.download.file
+#
+
+# A list of filesystems that will be configured in this file
+# under the sections image_file_url:<list entry name> (list
+# value)
+#filesystems=
+
+
 [baremetal]
 
 #
@@ -2898,7 +2943,7 @@
 # Options defined in nova.openstack.common.notifier.rpc_notifier2
 #
 
-# AMQP topic(s) used for openstack notifications (list value)
+# AMQP topic(s) used for OpenStack notifications (list value)
 #topics=notifications
 
 
@@ -3090,6 +3135,10 @@
 # compute_driver is vmwareapi.VMwareVCDriver. (string value)
 #cluster_name=<None>
 
+# Regex to match the name of a datastore. Used only if
+# compute_driver is vmwareapi.VMwareVCDriver. (string value)
+#datastore_regex=<None>
+
 # The interval used for polling of remote tasks. Used only if
 # compute_driver is vmwareapi.VMwareESXDriver or
 # vmwareapi.VMwareVCDriver. (floating point value)
@@ -3131,6 +3180,20 @@
 # http://<server>/vimService.wsdl. Optional over-ride to
 # default location for bug work-arounds (string value)
 #wsdl_location=<None>
+
+
+#
+# Options defined in nova.virt.vmwareapi.vim_util
+#
+
+# The maximum number of ObjectContent data objects that should
+# be returned in a single result. A positive value will cause
+# the operation to suspend the retrieval when the count of
+# objects reaches the specified maximum. The server may still
+# limit the count to something less than the configured value.
+# Any remaining objects may be retrieved with additional
+# requests. (integer value)
+#maximum_objects=100
 
 
 #

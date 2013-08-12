@@ -894,10 +894,6 @@ class NoCellsAvailable(NovaException):
     msg_fmt = _("No cells available matching scheduling criteria.")
 
 
-class CellError(NovaException):
-    msg_fmt = _("Exception received during cell processing: %(exc_name)s.")
-
-
 class CellsUpdateUnsupported(NovaException):
     msg_fmt = _("Cannot update cells configuration file.")
 
@@ -912,11 +908,6 @@ class SchedulerHostFilterNotFound(NotFound):
 
 class InstanceMetadataNotFound(NotFound):
     msg_fmt = _("Instance %(instance_uuid)s has no metadata with "
-                "key %(metadata_key)s.")
-
-
-class InstanceSystemMetadataNotFound(NotFound):
-    msg_fmt = _("Instance %(instance_uuid)s has no system metadata with "
                 "key %(metadata_key)s.")
 
 
@@ -1290,6 +1281,10 @@ class IncompatibleObjectVersion(NovaException):
     msg_fmt = _('Version %(objver)s of %(objname)s is not supported')
 
 
+class ObjectActionError(NovaException):
+    msg_fmt = _('Object action %(action)s failed because: %(reason)s')
+
+
 class CoreAPIMissing(NovaException):
     msg_fmt = _("Core API extensions are missing: %(missing_apis)s")
 
@@ -1327,3 +1322,34 @@ class InstanceGroupMemberNotFound(NotFound):
 
 class InstanceGroupPolicyNotFound(NotFound):
     msg_fmt = _("Instance group %(group_uuid)s has no policy %(policy)s.")
+
+
+class PluginRetriesExceeded(NovaException):
+    msg_fmt = _("Number of retries to plugin (%(num_retries)d) exceeded.")
+
+
+class ImageDownloadModuleError(NovaException):
+    msg_fmt = _("There was an error with the download module %(module)s. "
+                "%(reason)s")
+
+
+class ImageDownloadModuleLoadError(ImageDownloadModuleError):
+    msg_fmt = _("Could not load the module %(module)s")
+
+
+class ImageDownloadModuleMetaDataError(ImageDownloadModuleError):
+    msg_fmt = _("The metadata for this location will not work with this "
+                "module %(module)s.  %(reason)s.")
+
+
+class ImageDownloadModuleNotImplementedError(ImageDownloadModuleError):
+    msg_fmt = _("The method %(method_name)s is not implemented.")
+
+
+class ImageDownloadModuleMetaDataError(ImageDownloadModuleError):
+    msg_fmt = _("The metadata for this location will not work with this "
+                "module %(module)s.  %(reason)s.")
+
+
+class ImageDownloadModuleConfigurationError(ImageDownloadModuleError):
+    msg_fmt = _("The module %(module)s is misconfigured: %(reason)s.")

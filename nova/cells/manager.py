@@ -65,7 +65,7 @@ class CellsManager(manager.Manager):
 
     Scheduling requests get passed to the scheduler class.
     """
-    RPC_API_VERSION = '1.16'
+    RPC_API_VERSION = '1.18'
 
     def __init__(self, *args, **kwargs):
         # Mostly for tests.
@@ -261,6 +261,18 @@ class CellsManager(manager.Manager):
         cells_utils.add_cell_to_service(service, response.cell_name)
         return service
 
+    def get_host_uptime(self, ctxt, host_name):
+        """
+        Return host uptime for a compute host in a certain cell
+
+        :param host_name: fully qualified hostname. It should be in format of
+         parent!child@host_id
+        """
+        cell_name, host_name = cells_utils.split_cell_and_item(host_name)
+        response = self.msg_runner.get_host_uptime(ctxt, cell_name,
+                                                   host_name)
+        return response.value_or_raise()
+
     def service_update(self, ctxt, host_name, binary, params_to_update):
         """
         Used to enable/disable a service. For compute services, setting to
@@ -453,6 +465,14 @@ class CellsManager(manager.Manager):
         """Reboot an instance in its cell."""
         self.msg_runner.reboot_instance(ctxt, instance, reboot_type)
 
+    def pause_instance(self, ctxt, instance):
+        """Pause an instance in its cell."""
+        self.msg_runner.pause_instance(ctxt, instance)
+
+    def unpause_instance(self, ctxt, instance):
+        """Unpause an instance in its cell."""
+        self.msg_runner.unpause_instance(ctxt, instance)
+
     def suspend_instance(self, ctxt, instance):
         """Suspend an instance in its cell."""
         self.msg_runner.suspend_instance(ctxt, instance)
@@ -460,3 +480,11 @@ class CellsManager(manager.Manager):
     def resume_instance(self, ctxt, instance):
         """Resume an instance in its cell."""
         self.msg_runner.resume_instance(ctxt, instance)
+
+    def terminate_instance(self, ctxt, instance):
+        """Delete an instance in its cell."""
+        self.msg_runner.terminate_instance(ctxt, instance)
+
+    def soft_delete_instance(self, ctxt, instance):
+        """Soft-delete an instance in its cell."""
+        self.msg_runner.soft_delete_instance(ctxt, instance)

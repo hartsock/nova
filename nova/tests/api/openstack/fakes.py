@@ -106,7 +106,7 @@ def wsgi_app_v3(inner_app_v3=None, fake_auth_context=None,
         inner_app_v3 = compute.APIRouterV3(init_only)
 
     if use_no_auth:
-        api_v3 = openstack_api.FaultWrapper(auth.NoAuthMiddleware(
+        api_v3 = openstack_api.FaultWrapper(auth.NoAuthMiddlewareV3(
               limits.RateLimitingMiddleware(inner_app_v3)))
     else:
         if fake_auth_context is not None:
@@ -471,7 +471,7 @@ def stub_instance(id, user_id=None, project_id=None, host=None,
                   limit=None, marker=None,
                   launched_at=timeutils.utcnow(),
                   terminated_at=timeutils.utcnow(),
-                  availability_zone=''):
+                  availability_zone='', locked_by=None, cleaned=False):
 
     if user_id is None:
         user_id = 'fake_user'
@@ -545,7 +545,8 @@ def stub_instance(id, user_id=None, project_id=None, host=None,
         "availability_zone": availability_zone,
         "display_name": display_name or server_name,
         "display_description": "",
-        "locked": False,
+        "locked": locked_by != None,
+        "locked_by": locked_by,
         "metadata": metadata,
         "access_ip_v4": access_ipv4,
         "access_ip_v6": access_ipv6,
@@ -564,7 +565,8 @@ def stub_instance(id, user_id=None, project_id=None, host=None,
         "launched_on": "",
         "cell_name": "",
         "architecture": "",
-        "os_type": ""}
+        "os_type": "",
+        "cleaned": cleaned}
 
     instance.update(info_cache)
     instance['info_cache']['instance_uuid'] = instance['uuid']

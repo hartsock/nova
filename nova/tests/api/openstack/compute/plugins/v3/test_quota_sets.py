@@ -27,36 +27,32 @@ from nova import test
 from nova.tests.api.openstack import fakes
 
 
-def quota_set(id):
-    return {'quota_set': {'id': id, 'metadata_items': 128,
-            'ram': 51200, 'floating_ips': 10, 'fixed_ips': -1,
-            'instances': 10, 'injected_files': 5, 'cores': 20,
-            'injected_file_content_bytes': 10240,
-            'security_groups': 10, 'security_group_rules': 20,
-            'key_pairs': 100, 'injected_file_path_bytes': 255}}
-
-
 class QuotaSetsTest(test.TestCase):
 
     def setUp(self):
         super(QuotaSetsTest, self).setUp()
         self.controller = quotas.QuotaSetsController()
 
-    def test_format_quota_set(self):
-        raw_quota_set = {
-            'instances': 10,
-            'cores': 20,
-            'ram': 51200,
-            'floating_ips': 10,
-            'fixed_ips': -1,
-            'metadata_items': 128,
-            'injected_files': 5,
-            'injected_file_path_bytes': 255,
-            'injected_file_content_bytes': 10240,
-            'security_groups': 10,
-            'security_group_rules': 20,
-            'key_pairs': 100}
+    def _generate_quota_set(self, **kwargs):
+        quota_set = {
+            'quota_set': {'metadata_items': 128,
+                          'ram': 51200,
+                          'floating_ips': 10,
+                          'fixed_ips': -1,
+                          'instances': 10,
+                          'injected_files': 5,
+                          'cores': 20,
+                          'injected_file_content_bytes': 10240,
+                          'security_groups': 10,
+                          'security_group_rules': 20,
+                          'key_pairs': 100,
+                          'injected_file_path_bytes': 255}
+        }
+        quota_set['quota_set'].update(kwargs)
+        return quota_set
 
+    def test_format_quota_set(self):
+        raw_quota_set = self._generate_quota_set()['quota_set']
         quota_set = self.controller._format_quota_set('1234', raw_quota_set)
         qs = quota_set['quota_set']
 
@@ -80,71 +76,42 @@ class QuotaSetsTest(test.TestCase):
         req = fakes.HTTPRequestV3.blank(uri)
         res_dict = self.controller.defaults(req, 'fake_tenant')
 
-        expected = {'quota_set': {
-                    'id': 'fake_tenant',
-                    'instances': 10,
-                    'cores': 20,
-                    'ram': 51200,
-                    'floating_ips': 10,
-                    'fixed_ips': -1,
-                    'metadata_items': 128,
-                    'injected_files': 5,
-                    'injected_file_path_bytes': 255,
-                    'injected_file_content_bytes': 10240,
-                    'security_groups': 10,
-                    'security_group_rules': 20,
-                    'key_pairs': 100}}
+        expected = self._generate_quota_set(id='fake_tenant')
 
         self.assertEqual(res_dict, expected)
 
     def test_quotas_show_as_admin(self):
         req = fakes.HTTPRequestV3.blank('/os-quota-sets/1234',
                                       use_admin_context=True)
-        res_dict = self.controller.show(req, 1234)
+        res_dict = self.controller.show(req, '1234')
 
-        self.assertEqual(res_dict, quota_set('1234'))
+        self.assertEqual(res_dict, self._generate_quota_set(id='1234'))
 
     def test_quotas_show_as_unauthorized_user(self):
         req = fakes.HTTPRequestV3.blank('/os-quota-sets/1234')
         self.assertRaises(webob.exc.HTTPForbidden, self.controller.show,
-                          req, 1234)
+                          req, '1234')
 
     def test_quotas_update_as_admin(self):
-        body = {'quota_set': {'instances': 50, 'cores': 50,
-                              'ram': 51200, 'floating_ips': 10,
-                              'fixed_ips': -1, 'metadata_items': 128,
-                              'injected_files': 5,
-                              'injected_file_content_bytes': 10240,
-                              'injected_file_path_bytes': 255,
-                              'security_groups': 10,
-                              'security_group_rules': 20,
-                              'key_pairs': 100, 'fixed_ips': -1}}
-
-        req = fakes.HTTPRequestV3.blank('/os-quota-sets/update_me',
+        id = 'update_me'
+        body = self._generate_quota_set()
+        req = fakes.HTTPRequestV3.blank('/os-quota-sets/' + id,
                                       use_admin_context=True)
-        res_dict = self.controller.update(req, 'update_me', body)
-
+        res_dict = self.controller.update(req, id, body)
+        body['quota_set'].update(id=id)
         self.assertEqual(res_dict, body)
 
     def test_quotas_update_as_user(self):
-        body = {'quota_set': {'instances': 50, 'cores': 50,
-                              'ram': 51200, 'floating_ips': 10,
-                              'fixed_ips': -1, 'metadata_items': 128,
-                              'injected_files': 5,
-                              'injected_file_content_bytes': 10240,
-                              'security_groups': 10,
-                              'security_group_rules': 20,
-                              'key_pairs': 100}}
+        body = self._generate_quota_set()
 
         req = fakes.HTTPRequestV3.blank('/os-quota-sets/update_me')
         self.assertRaises(webob.exc.HTTPForbidden, self.controller.update,
                           req, 'update_me', body)
 
     def test_quotas_update_invalid_key(self):
-        body = {'quota_set': {'instances2': -2, 'cores': -2,
-                              'ram': -2, 'floating_ips': -2,
-                              'metadata_items': -2, 'injected_files': -2,
-                              'injected_file_content_bytes': -2}}
+        body = self._generate_quota_set()
+        body['quota_set'].pop('instances')
+        body['quota_set']['instances2'] = 10
 
         req = fakes.HTTPRequestV3.blank('/os-quota-sets/update_me',
                                       use_admin_context=True)
@@ -152,10 +119,7 @@ class QuotaSetsTest(test.TestCase):
                           req, 'update_me', body)
 
     def test_quotas_update_invalid_limit(self):
-        body = {'quota_set': {'instances': -2, 'cores': -2,
-                              'ram': -2, 'floating_ips': -2, 'fixed_ips': -2,
-                              'metadata_items': -2, 'injected_files': -2,
-                              'injected_file_content_bytes': -2}}
+        body = self._generate_quota_set(instances=-2)
 
         req = fakes.HTTPRequestV3.blank('/os-quota-sets/update_me',
                                       use_admin_context=True)
@@ -163,69 +127,30 @@ class QuotaSetsTest(test.TestCase):
                           req, 'update_me', body)
 
     def test_quotas_update_invalid_value_json_fromat_empty_string(self):
-        expected_resp = {'quota_set': {
-                              'instances': 50, 'cores': 50,
-                              'ram': 51200, 'floating_ips': 10,
-                              'fixed_ips': -1, 'metadata_items': 128,
-                              'injected_files': 5,
-                              'injected_file_content_bytes': 10240,
-                              'injected_file_path_bytes': 255,
-                              'security_groups': 10,
-                              'security_group_rules': 20,
-                              'key_pairs': 100}}
+        id = 'update_me'
+        expected_resp = self._generate_quota_set(id=id)
 
         # when PUT JSON format with empty string for quota
-        body = {'quota_set': {'instances': 50, 'cores': 50,
-                              'ram': '', 'floating_ips': 10,
-                              'fixed_ips': -1, 'metadata_items': 128,
-                              'injected_files': 5,
-                              'injected_file_content_bytes': 10240,
-                              'injected_file_path_bytes': 255,
-                              'security_groups': 10,
-                              'security_group_rules': 20,
-                              'key_pairs': 100}}
-        req = fakes.HTTPRequestV3.blank('/os-quota-sets/update_me',
+        body = self._generate_quota_set(ram='')
+        req = fakes.HTTPRequestV3.blank('/os-quota-sets/' + id,
                                       use_admin_context=True)
-        res_dict = self.controller.update(req, 'update_me', body)
+        res_dict = self.controller.update(req, id, body)
         self.assertEqual(res_dict, expected_resp)
 
     def test_quotas_update_invalid_value_xml_fromat_empty_string(self):
-        expected_resp = {'quota_set': {
-                              'instances': 50, 'cores': 50,
-                              'ram': 51200, 'floating_ips': 10,
-                              'fixed_ips': -1, 'metadata_items': 128,
-                              'injected_files': 5,
-                              'injected_file_content_bytes': 10240,
-                              'injected_file_path_bytes': 255,
-                              'security_groups': 10,
-                              'security_group_rules': 20,
-                              'key_pairs': 100}}
+        id = 'update_me'
+        expected_resp = self._generate_quota_set(id=id)
+
         # when PUT XML format with empty string for quota
-        body = {'quota_set': {'instances': 50, 'cores': 50,
-                              'ram': {}, 'floating_ips': 10,
-                              'fixed_ips': -1, 'metadata_items': 128,
-                              'injected_files': 5,
-                              'injected_file_content_bytes': 10240,
-                              'injected_file_path_bytes': 255,
-                              'security_groups': 10,
-                              'security_group_rules': 20,
-                              'key_pairs': 100}}
-        req = fakes.HTTPRequestV3.blank('/os-quota-sets/update_me',
+        body = self._generate_quota_set(ram={})
+        req = fakes.HTTPRequestV3.blank('/os-quota-sets/' + id,
                                       use_admin_context=True)
-        res_dict = self.controller.update(req, 'update_me', body)
+        res_dict = self.controller.update(req, id, body)
         self.assertEqual(res_dict, expected_resp)
 
     def test_quotas_update_invalid_value_non_int(self):
         # when PUT non integer value
-        body = {'quota_set': {'instances': test, 'cores': 50,
-                              'ram': {}, 'floating_ips': 10,
-                              'fixed_ips': -1, 'metadata_items': 128,
-                              'injected_files': 5,
-                              'injected_file_content_bytes': 10240,
-                              'injected_file_path_bytes': 255,
-                              'security_groups': 10,
-                              'security_group_rules': 20,
-                              'key_pairs': 100}}
+        body = self._generate_quota_set(ram={}, instances=test)
         req = fakes.HTTPRequestV3.blank('/os-quota-sets/update_me',
                                       use_admin_context=True)
         self.assertRaises(webob.exc.HTTPBadRequest, self.controller.update,
@@ -234,7 +159,7 @@ class QuotaSetsTest(test.TestCase):
     def test_quotas_delete_as_unauthorized_user(self):
         req = fakes.HTTPRequestV3.blank('/os-quota-sets/1234')
         self.assertRaises(webob.exc.HTTPForbidden, self.controller.delete,
-                          req, 1234)
+                          req, '1234')
 
     def test_quotas_delete_as_admin(self):
         context = context_maker.get_admin_context()
@@ -242,11 +167,10 @@ class QuotaSetsTest(test.TestCase):
         self.req.environ['nova.context'] = context
         self.mox.StubOutWithMock(quota.QUOTAS,
                                  "destroy_all_by_project")
-        quota.QUOTAS.destroy_all_by_project(context, 1234)
+        quota.QUOTAS.destroy_all_by_project(context, '1234')
         self.mox.ReplayAll()
-        res = self.controller.delete(self.req, 1234)
+        res = self.controller.delete(self.req, '1234')
         self.mox.VerifyAll()
-        self.assertEqual(res.status_int, 202)
 
     def test_quotas_update_exceed_in_used(self):
 
@@ -260,11 +184,13 @@ class QuotaSetsTest(test.TestCase):
                           req, 'update_me', body)
 
     def test_quotas_force_update_exceed_in_used(self):
+        id = 'update_me'
         self.stubs.Set(quotas.QuotaSetsController, '_get_quotas',
                        fake_get_quotas)
-        req = fakes.HTTPRequestV3.blank('/os-quota-sets/update_me',
+        req = fakes.HTTPRequestV3.blank('/os-quota-sets/' + id,
                                       use_admin_context=True)
-        expected = {'quota_set': {'ram': 25600, 'instances': 200, 'cores': 10}}
+        expected = {'quota_set': {'ram': 25600, 'instances': 200, 'cores': 10,
+                                  'id': id}}
         body = {'quota_set': {'ram': 25600,
                               'instances': 200,
                               'cores': 10,
@@ -273,47 +199,32 @@ class QuotaSetsTest(test.TestCase):
         fake_quotas.get('cores')['limit'] = 10
         fake_quotas.get('instances')['limit'] = 200
 
-        res_dict = self.controller.update(req, 'update_me', body)
+        res_dict = self.controller.update(req, id, body)
         self.assertEqual(res_dict, expected)
 
     def test_user_quotas_show_as_admin(self):
         req = fakes.HTTPRequest.blank('/v2/fake4/os-quota-sets/1234?user_id=1',
                                       use_admin_context=True)
-        res_dict = self.controller.show(req, 1234)
+        res_dict = self.controller.show(req, '1234')
 
-        self.assertEqual(res_dict, quota_set('1234'))
+        self.assertEqual(res_dict, self._generate_quota_set(id='1234'))
 
     def test_user_quotas_show_as_unauthorized_user(self):
         req = fakes.HTTPRequest.blank('/v2/fake4/os-quota-sets/1234?user_id=1')
         self.assertRaises(webob.exc.HTTPForbidden, self.controller.show,
-                          req, 1234)
+                          req, '1234')
 
     def test_user_quotas_update_as_admin(self):
-        body = {'quota_set': {'instances': 10, 'cores': 20,
-                              'ram': 51200, 'floating_ips': 10,
-                              'fixed_ips': -1, 'metadata_items': 128,
-                              'injected_files': 5,
-                              'injected_file_content_bytes': 10240,
-                              'injected_file_path_bytes': 255,
-                              'security_groups': 10,
-                              'security_group_rules': 20,
-                              'key_pairs': 100, 'fixed_ips': -1}}
+        body = self._generate_quota_set()
 
         url = '/v2/fake4/os-quota-sets/update_me?user_id=1'
         req = fakes.HTTPRequest.blank(url, use_admin_context=True)
         res_dict = self.controller.update(req, 'update_me', body)
-
+        body['quota_set'].update({'id': 'update_me'})
         self.assertEqual(res_dict, body)
 
     def test_user_quotas_update_as_user(self):
-        body = {'quota_set': {'instances': 10, 'cores': 20,
-                              'ram': 51200, 'floating_ips': 10,
-                              'fixed_ips': -1, 'metadata_items': 128,
-                              'injected_files': 5,
-                              'injected_file_content_bytes': 10240,
-                              'security_groups': 10,
-                              'security_group_rules': 20,
-                              'key_pairs': 100}}
+        body = self._generate_quota_set()
 
         url = '/v2/fake4/os-quota-sets/update_me?user_id=1'
         req = fakes.HTTPRequest.blank(url)
@@ -330,7 +241,7 @@ class QuotaSetsTest(test.TestCase):
     def test_user_quotas_delete_as_unauthorized_user(self):
         req = fakes.HTTPRequest.blank('/v2/fake4/os-quota-sets/1234?user_id=1')
         self.assertRaises(webob.exc.HTTPForbidden, self.controller.delete,
-                          req, 1234)
+                          req, '1234')
 
     def test_user_quotas_delete_as_admin(self):
         context = context_maker.get_admin_context()
@@ -339,11 +250,10 @@ class QuotaSetsTest(test.TestCase):
         self.req.environ['nova.context'] = context
         self.mox.StubOutWithMock(quota.QUOTAS,
                                  "destroy_all_by_project_and_user")
-        quota.QUOTAS.destroy_all_by_project_and_user(context, 1234, '1')
+        quota.QUOTAS.destroy_all_by_project_and_user(context, '1234', '1')
         self.mox.ReplayAll()
-        res = self.controller.delete(self.req, 1234)
+        res = self.controller.delete(self.req, '1234')
         self.mox.VerifyAll()
-        self.assertEqual(res.status_int, 202)
 
 
 class QuotaXMLSerializerTest(test.TestCase):
